@@ -1,0 +1,40 @@
+name: check
+
+# Two halves. The plugin half loads the plugin the way K8s Dockside does and
+# fails on anything the app would refuse. The source half type-checks, runs
+# the unit tests, and rebuilds src/ to prove the committed ui/ matches it --
+# installing clones the repository, so a stale ui/ is what users would get.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  plugin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      - name: Check the plugin
+        # Pinned to the release this plugin's minAppVersion names, not to
+        # main: the check then matches the app the manifest claims to work
+        # with, and it does not depend on the Go module proxy having caught up
+        # with the app's branch. Bump it when minAppVersion goes up.
+        run: go run github.com/k8sdockside/k8sdockside/cmd/plugincheck@v0.1.12 .
+
+  source:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Typecheck, test, and check ui/ is in step with src/
+        run: npm run check

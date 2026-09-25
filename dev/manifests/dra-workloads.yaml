@@ -1,0 +1,164 @@
+# Workloads for the DRA example driver's simulated GPUs (gpu.example.com).
+#
+# Applied by dev/kind-dra.sh. The names match src/fixtures.ts, so what
+# `npm run preview` draws for the kind-worker node is what a real cluster
+# shows. The containers run the pause image: the example driver hands out no
+# real device, it only records which one each container would have had.
+#
+#   single-gpu-pod     one GPU, from a claim template
+#   two-gpu-pod        two GPUs in one request
+#   shared-a/shared-b  one ResourceClaim, one GPU, used by both pods
+#   too-many-gpus-pod  asks for 16; the worker has 8, so it stays Pending
+#   spare              a claim no pod uses, so it is never allocated
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dra-demo
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  namespace: dra-demo
+  name: single-gpu
+spec:
+  spec:
+    devices:
+      requests:
+      - name: gpu
+        exactly:
+          deviceClassName: gpu.example.com
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  namespace: dra-demo
+  name: two-gpus
+spec:
+  spec:
+    devices:
+      requests:
+      - name: gpus
+        exactly:
+          deviceClassName: gpu.example.com
+          allocationMode: ExactCount
+          count: 2
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  namespace: dra-demo
+  name: too-many-gpus
+spec:
+  spec:
+    devices:
+      requests:
+      - name: gpus
+        exactly:
+          deviceClassName: gpu.example.com
+          allocationMode: ExactCount
+          count: 16
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  namespace: dra-demo
+  name: shared-gpu
+spec:
+  devices:
+    requests:
+    - name: gpu
+      exactly:
+        deviceClassName: gpu.example.com
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  namespace: dra-demo
+  name: spare
+spec:
+  devices:
+    requests:
+    - name: gpu
+      exactly:
+        deviceClassName: gpu.example.com
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  namespace: dra-demo
+  name: single-gpu-pod
+spec:
+  containers:
+  - name: main
+    image: registry.k8s.io/pause:3.10
+    resources:
+      claims:
+      - name: gpu
+  resourceClaims:
+  - name: gpu
+    resourceClaimTemplateName: single-gpu
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  namespace: dra-demo
+  name: two-gpu-pod
+spec:
+  containers:
+  - name: main
+    image: registry.k8s.io/pause:3.10
+    resources:
+      claims:
+      - name: gpus
+  resourceClaims:
+  - name: gpus
+    resourceClaimTemplateName: two-gpus
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  namespace: dra-demo
+  name: shared-a
+spec:
+  containers:
+  - name: main
+    image: registry.k8s.io/pause:3.10
+    resources:
+      claims:
+      - name: gpu
+  resourceClaims:
+  - name: gpu
+    resourceClaimName: shared-gpu
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  namespace: dra-demo
+  name: shared-b
+spec:
+  containers:
+  - name: main
+    image: registry.k8s.io/pause:3.10
+    resources:
+      claims:
+      - name: gpu
+  resourceClaims:
+  - name: gpu
+    resourceClaimName: shared-gpu
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  namespace: dra-demo
+  name: too-many-gpus-pod
+spec:
+  containers:
+  - name: main
+    image: registry.k8s.io/pause:3.10
+    resources:
+      claims:
+      - name: gpus
+  resourceClaims:
+  - name: gpus
+    resourceClaimTemplateName: too-many-gpus

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The GPU & Accelerators plugin's own mark, drawn for this plugin: a chip
+  with four device squares on it, the way the Inventory page draws them -
+  three in use, one free. It names no vendor on purpose, because the plugin
+  covers them all. Mid-tone colours, so it reads on the app's light and dark
+  themes alike.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <g fill="#8a97a8">
+    <rect x="17" y="3" width="4" height="8" rx="1.5"/>
+    <rect x="30" y="3" width="4" height="8" rx="1.5"/>
+    <rect x="43" y="3" width="4" height="8" rx="1.5"/>
+    <rect x="17" y="53" width="4" height="8" rx="1.5"/>
+    <rect x="30" y="53" width="4" height="8" rx="1.5"/>
+    <rect x="43" y="53" width="4" height="8" rx="1.5"/>
+    <rect x="3" y="17" width="8" height="4" rx="1.5"/>
+    <rect x="3" y="30" width="8" height="4" rx="1.5"/>
+    <rect x="3" y="43" width="8" height="4" rx="1.5"/>
+    <rect x="53" y="17" width="8" height="4" rx="1.5"/>
+    <rect x="53" y="30" width="8" height="4" rx="1.5"/>
+    <rect x="53" y="43" width="8" height="4" rx="1.5"/>
+  </g>
+  <rect x="9" y="9" width="46" height="46" rx="9" fill="#24466e"/>
+  <rect x="15" y="15" width="16" height="16" rx="3.5" fill="#4a90f0"/>
+  <rect x="33" y="15" width="16" height="16" rx="3.5" fill="#4a90f0"/>
+  <rect x="15" y="33" width="16" height="16" rx="3.5" fill="#4a90f0"/>
+  <rect x="33" y="33" width="16" height="16" rx="3.5" fill="#3fbf85"/>
+</svg>
