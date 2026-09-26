@@ -36,6 +36,7 @@ export function stateLegend(units: Unit[], counts = false): HTMLElement {
 /** Everything a square says on hover, as one string for its title. */
 export function unitTitle(unit: Unit): string {
     const lines = [`${unit.name} — ${[unit.model, memory(unit.memory)].filter(Boolean).join(', ') || VENDOR_NAMES[unit.vendor]}`, STATE_WORDS[unit.state]];
+    if (unit.live?.util !== undefined) lines.push(`${Math.round(unit.live.util * 100)}% busy${unit.live.memoryUsed !== undefined ? `, ${memory(unit.live.memoryUsed) || '0'} in memory` : ''}`);
     if (unit.consumers.length) lines.push(`Used by ${unit.consumers.map((c) => c.pod).join(', ')}`);
     else if (unit.claims.length) lines.push(`Held by claim ${unit.claims.map((c) => c.name).join(', ')}`);
     if (unit.partitions.length) lines.push(`${unit.partitions.length} partitions: ${unit.partitions.map((p) => `${p.profile} ${p.state === 'free' ? 'free' : p.state === 'unhealthy' ? 'unhealthy' : 'in use'}`).join(', ')}`);
@@ -123,6 +124,7 @@ export function sourcePills(units: Unit[]): HTMLElement[] {
     const out: HTMLElement[] = [];
     if (units.some((u) => u.source === 'dra')) out.push(pill('DRA', 'dra', 'Published by a DRA driver in ResourceSlices'));
     if (units.some((u) => u.source === 'device-plugin')) out.push(pill('device plugin', 'dp', 'Advertised by a device plugin as an extended resource'));
+    if (units.some((u) => u.live)) out.push(pill('DCGM', 'dp', 'NVIDIA’s DCGM exporter, through Prometheus: which card is which, who has it, and how busy it is'));
     return out;
 }
 
@@ -158,7 +160,9 @@ function consumerRow(c: Consumer): HTMLElement {
         { class: 'who' },
         openName(c.pod, { kind: PODS, namespace: c.namespace, name: c.pod }),
         el('span', { class: 'faint' }, c.namespace),
-        c.claim ? el('span', { class: 'via' }, 'via ', openName(c.claim, { kind: CLAIMS, namespace: c.namespace, name: c.claim }, 'link-name small')) : el('span', { class: 'via' }, 'via device plugin'),
+        c.claim
+            ? el('span', { class: 'via' }, 'via ', openName(c.claim, { kind: CLAIMS, namespace: c.namespace, name: c.claim }, 'link-name small'))
+            : el('span', { class: 'via', title: c.via ? 'Named in the pod’s env; the scheduler does not know it has this card' : '' }, c.via ? `via ${c.via}` : 'via device plugin'),
     );
 }
 
@@ -202,6 +206,15 @@ export function inspector(unit: Unit | undefined, empty = 'Point at a device to 
     if (unit.cudaVersion) rows.push(['CUDA', unit.cudaVersion]);
     if (unit.slots > 1) rows.push(['Sharing', `${unit.sharing || 'shared'}, ${unit.slots} slots — ${Math.min(unit.consumers.length, unit.slots)} taken`]);
     if (unit.device) rows.push(['ResourceSlice', openName(unit.device.slice, { kind: SLICES, name: unit.device.slice }, 'link-name small')]);
+    if (unit.uuid) rows.push(['UUID', el('span', { class: 'mono small' }, unit.uuid)]);
+    if (unit.pciBus) rows.push(['PCI bus', el('span', { class: 'mono' }, unit.pciBus)]);
+    const live = unit.live;
+    if (live) {
+        if (live.util !== undefined) rows.push(['Utilisation', `${Math.round(live.util * 100)}%`]);
+        if (live.memoryUsed !== undefined) rows.push(['Memory in use', live.memoryTotal ? `${memory(live.memoryUsed) || '0'} of ${memory(live.memoryTotal)}` : memory(live.memoryUsed) || '0']);
+        if (live.temperature !== undefined) rows.push(['Temperature', `${Math.round(live.temperature)} °C`]);
+        if (live.power !== undefined) rows.push(['Power', `${Math.round(live.power)} W`]);
+    }
 
     const who = unit.consumers.length
         ? el('ul', { class: 'whos' }, ...unit.consumers.map(consumerRow))
@@ -220,7 +233,10 @@ export function inspector(unit: Unit | undefined, empty = 'Point at a device to 
         facts(rows),
         el('h3', {}, unit.consumers.length > 1 ? `Used by ${count(unit.consumers.length, 'pod')}` : 'Used by'),
         who,
-        unit.inferred && unit.consumers.length ? el('p', { class: 'hint' }, 'The device plugin says how many GPUs a pod got, not which ones. Pods are drawn on the cards in order.') : null,
+        unit.inferred && unit.consumers.length
+            ? el('p', { class: 'hint' }, 'The device plugin says how many GPUs a pod got, not which ones. Pods are drawn on the cards in order — NVIDIA’s DCGM exporter, scraped by Prometheus, would say exactly.')
+            : null,
+        !unit.inferred && unit.source === 'device-plugin' && unit.live ? el('p', { class: 'hint' }, 'Which pod has this card is DCGM’s pod mapping, read through Prometheus.') : null,
         unit.partitions.length
             ? el('div', {}, el('h3', {}, `${count(unit.partitions.length, 'partition')} of ${unit.slices} slices`), el('ul', { class: 'parts' }, ...unit.partitions.map(partitionRow)))
             : null,

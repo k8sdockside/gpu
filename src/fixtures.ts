@@ -30,7 +30,7 @@
 // It lives in src/ rather than src/pages/ because scripts/build.mjs turns
 // every non-test .ts under src/pages into a page of its own.
 
-import type { DaemonSet, Device, DeviceClass, KubeEvent, Node, Pod, ResourceClaim, ResourceClaimTemplate, ResourceSlice } from './model/kube.js';
+import type { Container, DaemonSet, Device, DeviceClass, KubeEvent, Node, Pod, ResourceClaim, ResourceClaimTemplate, ResourceSlice } from './model/kube.js';
 
 const T0 = '2026-09-20T08:00:00Z';
 
@@ -490,4 +490,173 @@ export const noDcgm: K8sDockside.ChartsPanel = {
     range: 180,
     source,
     charts: chartsPanel.charts.map((c) => ({ ...c, series: [] })),
+};
+
+// ----- one machine, four H100 NVL, three models ----------------------------------------------
+//
+// A real-world shape: one node with four H100 NVL cards bridged in pairs
+// (0–1 and 2–3, NV12), handed out by the device plugin, and three vLLM
+// servers with a model each in memory -- one of them split over two cards
+// with tensor parallelism. DCGM, scraped by Prometheus without honorLabels,
+// names the pod on each card as exported_pod. The pods were created in an
+// order that puts them on the wrong cards if they are placed by count, so
+// a test can tell DCGM's word from the count.
+
+const NVL_NODE = 'gpu-h100nvl-01';
+const NVL_CARDS = [
+    { index: '0', uuid: 'GPU-d1891b91-980f-4191-34f1-9b2046bf3af5', bus: '00000000:02:00.0', used: 86912 },
+    { index: '1', uuid: 'GPU-4e451bfb-2162-d0f0-777c-51277748e36c', bus: '00000000:64:00.0', used: 86890 },
+    { index: '2', uuid: 'GPU-5e83768b-5b44-7593-8d06-0a0bc7b22822', bus: '00000000:82:00.0', used: 85120 },
+    { index: '3', uuid: 'GPU-7ecb082d-46c8-e7b2-8804-c2979adfe8fe', bus: '00000000:E3:00.0', used: 88064 },
+];
+const NVL_MEMORY_MIB = 95830;
+
+function vllmPod(namespace: string, name: string, created: string, gpus: number, container: Container): Pod {
+    return {
+        apiVersion: 'v1',
+        kind: 'Pod',
+        metadata: { name, namespace, uid: `uid-${name}`, creationTimestamp: created, labels: { app: namespace } },
+        spec: { nodeName: NVL_NODE, containers: [{ name: 'vllm', ...container, resources: { limits: { 'nvidia.com/gpu': String(gpus), memory: '64Gi' } } }] },
+        status: { phase: 'Running', conditions: [{ type: 'Ready', status: 'True' }] },
+    };
+}
+
+export const nvlPods: Pod[] = [
+    // The image's entrypoint is the API server; the model is a flag.
+    vllmPod('vllm-gpt-oss-120b', 'vllm-gpt-oss-120b-67fcdc9f66-rz5j8', '2026-09-18T07:00:00Z', 1, {
+        image: 'vllm/vllm-openai:v0.11.2',
+        args: ['--model', 'openai/gpt-oss-120b', '--served-model-name', 'nhn-large', '--gpu-memory-utilization', '0.92', '--max-model-len', '131072'],
+    }),
+    // `vllm serve <model>`, with tensor parallelism over the NVLink pair.
+    vllmPod('vllm-ornith-1-5-35b', 'vllm-ornith-1-5-35b-69c77dbfcc-89ffh', '2026-09-18T07:05:00Z', 2, {
+        image: 'vllm/vllm-openai:v0.11.2',
+        command: ['vllm', 'serve', 'ornith-ai/Ornith-1.5-35B-A3B-FP8'],
+        args: ['--served-model-name=nhn-medium', '--tensor-parallel-size', '2', '--quantization', 'fp8'],
+    }),
+    // A shell script, with the model taken from the env.
+    vllmPod('vllm-qwen3-8-27b', 'vllm-qwen3-8-27b-7cfd766d96-rxpmz', '2026-09-18T07:10:00Z', 1, {
+        image: 'registry.internal/ai/vllm:0.11.2-cu128',
+        command: ['/bin/sh', '-c'],
+        args: ['exec vllm serve "$(MODEL)" --served-model-name nhn-coder --max-model-len 65536 --enable-auto-tool-choice'],
+        env: [{ name: 'MODEL', value: 'Qwen/Qwen3.8-27B-FP8' }],
+    }),
+];
+
+/** Which pod DCGM says each card is handed to, as in `nvidia-smi` and kubectl on the real machine. */
+const NVL_HOLDERS: Record<string, Pod> = {
+    '0': nvlPods[1] as Pod,
+    '1': nvlPods[1] as Pod,
+    '2': nvlPods[2] as Pod,
+    '3': nvlPods[0] as Pod,
+};
+
+export const nvlNodes: Node[] = [
+    node(NVL_NODE, gfd('NVIDIA-H100-NVL', NVL_MEMORY_MIB, 4, { 'nvidia.com/cuda.driver-version.full': '580.95.05', 'nvidia.com/cuda.runtime-version.full': '13.0' }), { 'nvidia.com/gpu': '4' }),
+    node('cpu-01', {}),
+];
+
+export const nvlLists: Record<string, unknown[]> = {
+    nodes: nvlNodes,
+    pods: [...nvlPods, pods.find((p) => p.metadata.name === 'web-0') as Pod],
+    resourceslices: [],
+    resourceclaims: [],
+    resourceclaimtemplates: [],
+    deviceclasses: [],
+    daemonsets: [ds('gpu-operator', 'nvidia-device-plugin-daemonset', 1, 1), ds('gpu-operator', 'nvidia-dcgm-exporter', 1, 1), ds('gpu-operator', 'gpu-feature-discovery', 1, 1)],
+    events: [],
+};
+
+/** A series named the way the app names one from a chart with no legend: every label, sorted. */
+function labelled(labels: Record<string, string>, value: number, end = Date.parse('2026-09-20T08:00:00Z') / 1000): K8sDockside.ChartSeries {
+    const name = Object.entries(labels)
+        .map(([k, v]) => `${k}=${v}`)
+        .sort()
+        .join(', ');
+    return { name, points: [0, 1, 2].map((i) => ({ t: end - (2 - i) * 15, v: value })) };
+}
+
+function dcgmLabels(card: (typeof NVL_CARDS)[number], holder: Pod | undefined): Record<string, string> {
+    return {
+        DCGM_FI_DRIVER_VERSION: '580.95.05',
+        Hostname: NVL_NODE,
+        UUID: card.uuid,
+        device: `nvidia${card.index}`,
+        gpu: card.index,
+        modelName: 'NVIDIA H100 NVL',
+        pci_bus_id: card.bus,
+        // Without honorLabels, the target's own labels keep the plain names...
+        namespace: 'gpu-operator',
+        pod: 'nvidia-dcgm-exporter-x7k2p',
+        // ...and the pod DCGM maps the card to is renamed.
+        ...(holder ? { exported_namespace: holder.metadata.namespace ?? '', exported_pod: holder.metadata.name, exported_container: 'vllm' } : {}),
+    };
+}
+
+/** What `charts()` answers on that machine: the DCGM charts and the vLLM ones, as Prometheus has them. */
+export function nvlCharts(options: { mapping?: boolean; stale?: boolean } = {}): K8sDockside.ChartsPanel {
+    const mapping = options.mapping ?? true;
+    const holder = (index: string) => (mapping ? NVL_HOLDERS[index] : undefined);
+    const perCard = (value: (card: (typeof NVL_CARDS)[number]) => number) => NVL_CARDS.map((card) => labelled({ Hostname: NVL_NODE, UUID: card.uuid }, value(card)));
+    const vllm = (value: (pod: Pod) => number) =>
+        nvlPods.map((pod) => labelled({ namespace: pod.metadata.namespace ?? '', pod: pod.metadata.name, model_name: ['nhn-large', 'nhn-medium', 'nhn-coder'][nvlPods.indexOf(pod)] ?? '' }, value(pod)));
+    const used = NVL_CARDS.map((card) => labelled(dcgmLabels(card, holder(card.index)), card.used));
+    // A pod that was on GPU 2 an hour ago and is gone: its series stopped, and must not count.
+    if (options.stale) used.push(labelled({ ...dcgmLabels(NVL_CARDS[2] as (typeof NVL_CARDS)[number], undefined), exported_namespace: 'old', exported_pod: 'gone-0' }, 1000, Date.parse('2026-09-20T07:00:00Z') / 1000));
+    return {
+        attached: true,
+        range: 10,
+        source,
+        charts: [
+            chart('gpu-util', 'GPU utilisation, by model', 'percent', [series('H100 NVL', 0.71, 0.1, 0)]),
+            chart('data-dcgm-memory-used', 'Data: DCGM memory used, per card', '', used),
+            chart('data-dcgm-util', 'Data: DCGM utilisation, per card', '', NVL_CARDS.map((card, i) => labelled(dcgmLabels(card, holder(card.index)), [64, 61, 38, 83][i] ?? 0))),
+            chart('data-dcgm-memory-free', 'Data: DCGM memory free, per card', '', perCard((card) => NVL_MEMORY_MIB - card.used)),
+            chart('data-dcgm-temperature', 'Data: DCGM temperature, per card', '', perCard((card) => 52 + Number(card.index) * 3)),
+            chart('data-dcgm-power', 'Data: DCGM power, per card', '', perCard((card) => 240 + Number(card.index) * 20)),
+            chart('data-vllm-running', 'Data: vLLM requests running', '', vllm((pod) => [7, 3, 12][nvlPods.indexOf(pod)] ?? 0)),
+            chart('data-vllm-kv-cache', 'Data: vLLM KV cache in use', '', vllm((pod) => [0.41, 0.18, 0.66][nvlPods.indexOf(pod)] ?? 0)),
+        ],
+    };
+}
+
+// ----- the same machine, set up by hand -------------------------------------------------------
+//
+// What a cluster looks like when the GPUs were wired up outside the
+// scheduler: the device plugin advertises 4 nvidia.com/gpu with no GPU
+// feature discovery beside it, no Prometheus, and the model servers ask for
+// no GPU at all -- they run with NVIDIA's runtime class and pick their cards
+// with NVIDIA_VISIBLE_DEVICES. An Ollama server names none.
+
+const BARE_NODE = 'talos-0uk-687';
+
+function byHand(pod: Pod, visible: string | null): Pod {
+    const container = pod.spec?.containers?.[0] ?? {};
+    const env = [...(container.env ?? []), ...(visible === null ? [] : [{ name: 'NVIDIA_VISIBLE_DEVICES', value: visible }])];
+    return {
+        ...pod,
+        spec: { ...pod.spec, nodeName: BARE_NODE, runtimeClassName: 'nvidia', containers: [{ ...container, env, resources: { limits: { memory: '64Gi' } } }] },
+    };
+}
+
+export const barePods: Pod[] = [
+    byHand(nvlPods[0] as Pod, '3'),
+    byHand(nvlPods[1] as Pod, '0,1'),
+    byHand(nvlPods[2] as Pod, 'GPU-5e83768b-5b44-7593-8d06-0a0bc7b22822'),
+    byHand(
+        {
+            apiVersion: 'v1',
+            kind: 'Pod',
+            metadata: { name: 'ollama-5d8f7c9b4-kq2lm', namespace: 'ollama', uid: 'uid-ollama', creationTimestamp: '2026-09-18T08:00:00Z' },
+            spec: { containers: [{ name: 'ollama', image: 'ollama/ollama:0.12.3' }] },
+            status: { phase: 'Running' },
+        },
+        null,
+    ),
+];
+
+export const bareLists: Record<string, unknown[]> = {
+    nodes: [node(BARE_NODE, { 'node-role.kubernetes.io/worker': '' }, { 'nvidia.com/gpu': '4' })],
+    pods: barePods,
+    daemonsets: [ds('kube-system', 'nvidia-device-plugin', 1, 1)],
+    events: [],
 };

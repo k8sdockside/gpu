@@ -32,7 +32,15 @@
 //    on the least-used units in order and every such unit is marked
 //    `inferred`, so the page can say it is a picture of the counts rather
 //    than of the cards.
+//  - Unless DCGM says. Its exporter reads every card through NVML and, with
+//    pod mapping on, asks the kubelet which pod each was handed to; when
+//    Prometheus has that, a device-plugin card gets its real index, UUID and
+//    PCI address, and the pods DCGM names replace the ones placed by count.
+//    Every card DCGM reports also gets its live numbers: utilisation,
+//    memory, temperature, power.
 
+import type { DcgmGpu } from './dcgm.js';
+import { visibleDevices } from './visible.js';
 import { allocatedDevices, deviceKey, deviceMemory, deviceModel, reservedPods, sliceDevices, type SliceDevice } from './dra.js';
 import { condition, isLive, type Node, type Pod, type ResourceClaim, type Snapshot } from './kube.js';
 import { podDeviceRequests } from './requests.js';
@@ -61,6 +69,8 @@ export interface Consumer {
     namespace: string;
     pod: string;
     claim: string;
+    /** The env variable that named the card, for a pod that did not ask the scheduler for it. */
+    via?: string;
 }
 
 /** A claim holding a device, by namespace and name. */
@@ -84,6 +94,17 @@ export interface Partition {
     device?: SliceDevice;
     /** One of the ways a partitionable card could be carved, drawn only once it is allocated. */
     dynamic?: boolean;
+}
+
+/** A card's numbers right now, from DCGM. */
+export interface Live {
+    /** 0-1. */
+    util?: number;
+    memoryUsed?: number;
+    memoryTotal?: number;
+    temperature?: number;
+    power?: number;
+    nvlink?: number;
 }
 
 export interface Unit {
@@ -116,6 +137,12 @@ export interface Unit {
     /** Placed by counting, not by the API: the device plugin never says which card a pod got. */
     inferred: boolean;
     problem: string;
+    /** The card's UUID, from its DRA driver or DCGM; '' when neither says. */
+    uuid: string;
+    /** Its PCI bus address, "00000000:02:00.0". */
+    pciBus: string;
+    /** What DCGM reports about it now; absent when Prometheus has no DCGM for it. */
+    live?: Live;
 }
 
 export interface NodeView {
@@ -162,7 +189,7 @@ export interface Inventory {
 
 // ----- building it ------------------------------------------------------------------
 
-export function buildInventory(snap: Pick<Snapshot, 'nodes' | 'pods' | 'slices' | 'claims'>): Inventory {
+export function buildInventory(snap: Pick<Snapshot, 'nodes' | 'pods' | 'slices' | 'claims'>, dcgm: DcgmGpu[] = []): Inventory {
     const nodesByName = new Map(snap.nodes.map((node) => [node.metadata.name, node]));
     const devices = sliceDevices(snap.slices).filter((d) => isAcceleratorDriver(d.driver));
 
@@ -207,6 +234,9 @@ export function buildInventory(snap: Pick<Snapshot, 'nodes' | 'pods' | 'slices' 
         if (units.length) view(node.metadata.name).units.push(...units);
     }
 
+    if (dcgm.length) applyDcgm([...views.values()], dcgm);
+    applyVisible([...views.values()], snap.pods);
+
     const nodes = [...views.values()]
         .filter((v) => v.units.length > 0)
         .sort((a, b) => (a.name === '' ? 1 : b.name === '' ? -1 : a.name.localeCompare(b.name, undefined, { numeric: true })));
@@ -232,6 +262,8 @@ function blankUnit(partial: Partial<Unit> & Pick<Unit, 'id' | 'node' | 'source' 
         sharing: '',
         inferred: false,
         problem: '',
+        uuid: '',
+        pciBus: '',
         ...partial,
     };
 }
@@ -256,6 +288,8 @@ function unitFromDevice(device: SliceDevice): Unit {
         driverVersion: device.attributes['driverVersion'] ?? '',
         cudaVersion: device.attributes['cudaDriverVersion'] ?? '',
         device,
+        uuid: device.attributes['uuid'] ?? '',
+        pciBus: device.attributes['pcieBusID'] ?? device.attributes['pciBusID'] ?? device.attributes['pciAddress'] ?? '',
         problem: device.tainted ? `The driver has tainted this device (${device.tainted}): the scheduler will not hand it out.` : '',
     });
 }
@@ -609,6 +643,103 @@ function migUnits(
         if (lost) unit.problem = `The device plugin reports ${lost} MIG instance${lost === 1 ? '' : 's'} here unhealthy.`;
     }
     return units;
+}
+
+// ----- DCGM ------------------------------------------------------------------------------------
+
+/**
+ * Puts what DCGM says onto the cards it describes.
+ *
+ * A DRA device is found by its UUID. The device plugin's cards have no
+ * identity of their own -- they are counted -- so they take DCGM's cards in
+ * nvidia-smi's order: the first square is GPU 0. When DCGM names the pods on
+ * a node's cards, those replace the pods placed by count, and the cards stop
+ * being `inferred`. MIG cards are left as they are: DCGM's instances and the
+ * device plugin's packing do not line up one to one.
+ */
+function applyDcgm(views: NodeView[], gpus: DcgmGpu[]): void {
+    const byNode = new Map<string, DcgmGpu[]>();
+    for (const gpu of gpus) byNode.set(gpu.node, [...(byNode.get(gpu.node) ?? []), gpu]);
+
+    for (const view of views) {
+        const list = (byNode.get(view.name) ?? []).sort((a, b) => Number(a.index) - Number(b.index));
+        if (!list.length) continue;
+        const taken = new Set<DcgmGpu>();
+
+        for (const unit of view.units) {
+            if (unit.source !== 'dra' || !unit.uuid) continue;
+            const gpu = list.find((g) => g.uuid === unit.uuid);
+            if (!gpu) continue;
+            taken.add(gpu);
+            describe(unit, gpu);
+        }
+
+        const counted = view.units.filter((u) => u.source === 'device-plugin' && u.vendor === 'nvidia' && u.partitions.length === 0);
+        const cards = list.filter((g) => !taken.has(g) && !g.mig);
+        if (!counted.length || !cards.length) continue;
+        if (cards.length !== counted.length) {
+            view.notes.push(`DCGM reports ${cards.length} ${cards.length === 1 ? 'GPU' : 'GPUs'} here and the device plugin advertises ${counted.length}: ${cards.length > counted.length ? 'some cards are not handed out' : 'some cards are not reported'}, so which card is which is matched in order.`);
+        }
+        // Pod mapping is on for a node when DCGM names a pod on any of its cards.
+        const mapped = cards.some((g) => g.consumers.length > 0);
+        counted.forEach((unit, i) => {
+            const gpu = cards[i];
+            if (!gpu) return;
+            describe(unit, gpu);
+            unit.label = gpu.index || unit.label;
+            unit.name = gpu.index ? `GPU ${gpu.index}` : unit.name;
+            if (!mapped) return;
+            unit.consumers = gpu.consumers.map((c) => ({ namespace: c.namespace, pod: c.pod, claim: '' }));
+            unit.inferred = false;
+            if (unit.consumers.length) unit.state = holdState([], unit.consumers, false);
+            else if (unit.state !== 'unhealthy') unit.state = 'free';
+        });
+    }
+}
+
+function describe(unit: Unit, gpu: DcgmGpu): void {
+    unit.uuid ||= gpu.uuid;
+    unit.pciBus ||= gpu.pciBus;
+    unit.model ||= friendlyModel(gpu.model);
+    const total = (gpu.memoryUsed ?? 0) + (gpu.memoryFree ?? 0);
+    if (!unit.memory && total > 0) unit.memory = total;
+    unit.live = {
+        util: gpu.util,
+        memoryUsed: gpu.memoryUsed,
+        memoryTotal: total > 0 ? total : unit.memory || undefined,
+        temperature: gpu.temperature,
+        power: gpu.power,
+        nvlink: gpu.nvlink,
+    };
+}
+
+// ----- GPUs named in a pod's env ------------------------------------------------------------------
+
+/**
+ * Puts the pods that reach a GPU through NVIDIA_VISIBLE_DEVICES or
+ * CUDA_VISIBLE_DEVICES -- and not through the scheduler -- on the cards they
+ * name: by index, as nvidia-smi numbers them, or by UUID. "all" is every
+ * card on the node. See visible.ts.
+ */
+function applyVisible(views: NodeView[], pods: Pod[]): void {
+    const byNode = new Map(views.map((v) => [v.name, v]));
+    for (const pod of pods) {
+        const node = pod.spec?.nodeName;
+        if (!node || !isLive(pod)) continue;
+        const view = byNode.get(node);
+        const visible = view ? visibleDevices(pod) : undefined;
+        if (!view || !visible) continue;
+        const wanted = visible.devices.map((d) => d.toLowerCase());
+        const targets = visible.all ? view.units : view.units.filter((u) => wanted.includes(u.label.toLowerCase()) || (u.uuid !== '' && wanted.includes(u.uuid.toLowerCase())));
+        for (const unit of targets) {
+            const consumer: Consumer = { namespace: pod.metadata.namespace ?? '', pod: pod.metadata.name, claim: '', via: visible.env };
+            if (unit.consumers.some((c) => c.namespace === consumer.namespace && c.pod === consumer.pod)) continue;
+            unit.consumers.push(consumer);
+            if (unit.partitions.length === 0) unit.state = holdState(unit.claims, unit.consumers, false);
+            // Named in the spec, not counted: the card is no guess when these are all it has.
+            if (unit.consumers.every((c) => c.via)) unit.inferred = false;
+        }
+    }
 }
 
 // ----- adding up -------------------------------------------------------------------------------

@@ -11,13 +11,13 @@
 // free?) or by driver (what does the DRA driver publish, and what the device
 // plugin?). The choice is remembered.
 
-import { buildInventory, type Inventory, type Unit } from '../model/inventory.js';
+import { type Inventory, type Unit } from '../model/inventory.js';
 import { NODES } from '../model/kube.js';
 import { count } from '../model/units.js';
 import { VENDOR_NAMES } from '../model/vendors.js';
 import { byId, el, replace } from '../ui/dom.js';
 import { grid, inspector, nodeCard, sourcePills, stateLegend, usePill, type GridOptions } from '../ui/grid.js';
-import { loadSnapshot } from '../ui/load.js';
+import { dcgmReader, inventoryWithDcgm, loadSnapshot } from '../ui/load.js';
 import { every, message, remember, remembered, start } from '../ui/page.js';
 import { heading, nothing, openName } from '../ui/parts.js';
 
@@ -112,11 +112,12 @@ start('page', async (ctx) => {
     };
 
     replace(body, failure, summary, el('div', { class: 'inventory' }, main, side));
+    const read = dcgmReader();
     const stop = every(
         REFRESH,
         async () => {
             const snap = await loadSnapshot({ events: false, daemonSets: false });
-            inventory = buildInventory(snap);
+            ({ inventory } = await inventoryWithDcgm(snap, read));
             failure.textContent = '';
             document.getElementById('first')?.remove();
             draw();

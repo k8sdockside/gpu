@@ -273,6 +273,73 @@
     return out.sort((a, b) => RANK[a.tone] - RANK[b.tone]);
   }
 
+  // src/model/requests.ts
+  var CLASS_RESOURCE_PREFIX = "deviceclass.resource.kubernetes.io/";
+  function isAcceleratorRequest(name, classResources = /* @__PURE__ */ new Set()) {
+    return isDeviceResource(name) || name.startsWith(CLASS_RESOURCE_PREFIX) || classResources.has(name);
+  }
+  function podDeviceRequests(pod, classResources = /* @__PURE__ */ new Set()) {
+    const running = {};
+    const add = (into, container) => {
+      for (const [name, amount] of Object.entries(wanted(container))) {
+        if (isAcceleratorRequest(name, classResources)) into[name] = (into[name] ?? 0) + amount;
+      }
+    };
+    for (const container of pod.spec?.containers ?? []) add(running, container);
+    const inits = pod.spec?.initContainers ?? [];
+    for (const container of inits) if (container.restartPolicy === "Always") add(running, container);
+    const out = { ...running };
+    for (const container of inits) {
+      if (container.restartPolicy === "Always") continue;
+      const alone = {};
+      add(alone, container);
+      for (const [name, amount] of Object.entries(alone)) out[name] = Math.max(out[name] ?? 0, amount);
+    }
+    return out;
+  }
+  function wanted(container) {
+    const out = {};
+    for (const [name, value] of Object.entries(container.resources?.requests ?? {})) out[name] = quantity(value);
+    for (const [name, value] of Object.entries(container.resources?.limits ?? {})) out[name] = quantity(value);
+    return out;
+  }
+  function podClaims(pod) {
+    const statuses = new Map((pod.status?.resourceClaimStatuses ?? []).map((s) => [s.name ?? "", s.resourceClaimName ?? ""]));
+    const out = (pod.spec?.resourceClaims ?? []).map((c) => ({
+      entry: c.name ?? "",
+      claim: c.resourceClaimName ?? statuses.get(c.name ?? "") ?? "",
+      template: c.resourceClaimTemplateName ?? ""
+    }));
+    const extended = pod.status?.extendedResourceClaimStatus?.resourceClaimName;
+    if (extended) out.push({ entry: "(extended resource)", claim: extended, template: "" });
+    return out;
+  }
+
+  // src/model/visible.ts
+  var VISIBLE_ENV = ["NVIDIA_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"];
+  function parseVisible(value) {
+    const text = value.trim();
+    if (!text || /^(none|void|NoDevFiles)$/i.test(text)) return void 0;
+    if (/^all$/i.test(text)) return { all: true, devices: [] };
+    const devices = text.split(",").map((d) => d.trim()).filter((d) => /^\d+$/.test(d) || /^(GPU|MIG)-[0-9a-f-]+$/i.test(d));
+    return devices.length ? { all: false, devices } : void 0;
+  }
+  function asksScheduler(pod) {
+    return Object.keys(podDeviceRequests(pod)).length > 0 || podClaims(pod).length > 0;
+  }
+  function visibleDevices(pod) {
+    if (asksScheduler(pod)) return void 0;
+    for (const container of pod.spec?.containers ?? []) {
+      for (const name of VISIBLE_ENV) {
+        const value = container.env?.find((e) => e.name === name)?.value;
+        if (value === void 0) continue;
+        const parsed = parseVisible(value);
+        if (parsed) return { ...parsed, env: name, container: container.name ?? "" };
+      }
+    }
+    return void 0;
+  }
+
   // src/model/dra.ts
   function deviceKey(driver, pool, device) {
     return `${driver}/${pool}/${device}`;
@@ -406,50 +473,8 @@
     return "";
   }
 
-  // src/model/requests.ts
-  var CLASS_RESOURCE_PREFIX = "deviceclass.resource.kubernetes.io/";
-  function isAcceleratorRequest(name, classResources = /* @__PURE__ */ new Set()) {
-    return isDeviceResource(name) || name.startsWith(CLASS_RESOURCE_PREFIX) || classResources.has(name);
-  }
-  function podDeviceRequests(pod, classResources = /* @__PURE__ */ new Set()) {
-    const running = {};
-    const add = (into, container) => {
-      for (const [name, amount] of Object.entries(wanted(container))) {
-        if (isAcceleratorRequest(name, classResources)) into[name] = (into[name] ?? 0) + amount;
-      }
-    };
-    for (const container of pod.spec?.containers ?? []) add(running, container);
-    const inits = pod.spec?.initContainers ?? [];
-    for (const container of inits) if (container.restartPolicy === "Always") add(running, container);
-    const out = { ...running };
-    for (const container of inits) {
-      if (container.restartPolicy === "Always") continue;
-      const alone = {};
-      add(alone, container);
-      for (const [name, amount] of Object.entries(alone)) out[name] = Math.max(out[name] ?? 0, amount);
-    }
-    return out;
-  }
-  function wanted(container) {
-    const out = {};
-    for (const [name, value] of Object.entries(container.resources?.requests ?? {})) out[name] = quantity(value);
-    for (const [name, value] of Object.entries(container.resources?.limits ?? {})) out[name] = quantity(value);
-    return out;
-  }
-  function podClaims(pod) {
-    const statuses = new Map((pod.status?.resourceClaimStatuses ?? []).map((s) => [s.name ?? "", s.resourceClaimName ?? ""]));
-    const out = (pod.spec?.resourceClaims ?? []).map((c) => ({
-      entry: c.name ?? "",
-      claim: c.resourceClaimName ?? statuses.get(c.name ?? "") ?? "",
-      template: c.resourceClaimTemplateName ?? ""
-    }));
-    const extended = pod.status?.extendedResourceClaimStatus?.resourceClaimName;
-    if (extended) out.push({ entry: "(extended resource)", claim: extended, template: "" });
-    return out;
-  }
-
   // src/model/inventory.ts
-  function buildInventory(snap) {
+  function buildInventory(snap, dcgm = []) {
     const nodesByName = new Map(snap.nodes.map((node) => [node.metadata.name, node]));
     const devices = sliceDevices(snap.slices).filter((d) => isAcceleratorDriver(d.driver));
     const byKey = /* @__PURE__ */ new Map();
@@ -486,6 +511,8 @@
       const units2 = unitsFromNode(node, podsByNode.get(node.metadata.name) ?? [], draVendors, (note) => view(node.metadata.name).notes.push(note));
       if (units2.length) view(node.metadata.name).units.push(...units2);
     }
+    if (dcgm.length) applyDcgm([...views.values()], dcgm);
+    applyVisible([...views.values()], snap.pods);
     const nodes = [...views.values()].filter((v) => v.units.length > 0).sort((a, b) => a.name === "" ? 1 : b.name === "" ? -1 : a.name.localeCompare(b.name, void 0, { numeric: true }));
     const units = nodes.flatMap((n) => n.units);
     return { nodes, units, totals: totals(units), byModel: tally(units, (u) => modelKey(u)), byVendor: tally(units, (u) => [u.vendor, VENDOR_NAMES[u.vendor]]), byKey };
@@ -506,6 +533,8 @@
       sharing: "",
       inferred: false,
       problem: "",
+      uuid: "",
+      pciBus: "",
       ...partial
     };
   }
@@ -527,6 +556,8 @@
       driverVersion: device.attributes["driverVersion"] ?? "",
       cudaVersion: device.attributes["cudaDriverVersion"] ?? "",
       device,
+      uuid: device.attributes["uuid"] ?? "",
+      pciBus: device.attributes["pcieBusID"] ?? device.attributes["pciBusID"] ?? device.attributes["pciAddress"] ?? "",
       problem: device.tainted ? `The driver has tainted this device (${device.tainted}): the scheduler will not hand it out.` : ""
     });
   }
@@ -799,6 +830,75 @@
     }
     return units;
   }
+  function applyDcgm(views, gpus) {
+    const byNode = /* @__PURE__ */ new Map();
+    for (const gpu of gpus) byNode.set(gpu.node, [...byNode.get(gpu.node) ?? [], gpu]);
+    for (const view of views) {
+      const list = (byNode.get(view.name) ?? []).sort((a, b) => Number(a.index) - Number(b.index));
+      if (!list.length) continue;
+      const taken = /* @__PURE__ */ new Set();
+      for (const unit of view.units) {
+        if (unit.source !== "dra" || !unit.uuid) continue;
+        const gpu = list.find((g) => g.uuid === unit.uuid);
+        if (!gpu) continue;
+        taken.add(gpu);
+        describe(unit, gpu);
+      }
+      const counted = view.units.filter((u) => u.source === "device-plugin" && u.vendor === "nvidia" && u.partitions.length === 0);
+      const cards = list.filter((g) => !taken.has(g) && !g.mig);
+      if (!counted.length || !cards.length) continue;
+      if (cards.length !== counted.length) {
+        view.notes.push(`DCGM reports ${cards.length} ${cards.length === 1 ? "GPU" : "GPUs"} here and the device plugin advertises ${counted.length}: ${cards.length > counted.length ? "some cards are not handed out" : "some cards are not reported"}, so which card is which is matched in order.`);
+      }
+      const mapped = cards.some((g) => g.consumers.length > 0);
+      counted.forEach((unit, i) => {
+        const gpu = cards[i];
+        if (!gpu) return;
+        describe(unit, gpu);
+        unit.label = gpu.index || unit.label;
+        unit.name = gpu.index ? `GPU ${gpu.index}` : unit.name;
+        if (!mapped) return;
+        unit.consumers = gpu.consumers.map((c) => ({ namespace: c.namespace, pod: c.pod, claim: "" }));
+        unit.inferred = false;
+        if (unit.consumers.length) unit.state = holdState([], unit.consumers, false);
+        else if (unit.state !== "unhealthy") unit.state = "free";
+      });
+    }
+  }
+  function describe(unit, gpu) {
+    unit.uuid ||= gpu.uuid;
+    unit.pciBus ||= gpu.pciBus;
+    unit.model ||= friendlyModel(gpu.model);
+    const total = (gpu.memoryUsed ?? 0) + (gpu.memoryFree ?? 0);
+    if (!unit.memory && total > 0) unit.memory = total;
+    unit.live = {
+      util: gpu.util,
+      memoryUsed: gpu.memoryUsed,
+      memoryTotal: total > 0 ? total : unit.memory || void 0,
+      temperature: gpu.temperature,
+      power: gpu.power,
+      nvlink: gpu.nvlink
+    };
+  }
+  function applyVisible(views, pods) {
+    const byNode = new Map(views.map((v) => [v.name, v]));
+    for (const pod of pods) {
+      const node = pod.spec?.nodeName;
+      if (!node || !isLive(pod)) continue;
+      const view = byNode.get(node);
+      const visible = view ? visibleDevices(pod) : void 0;
+      if (!view || !visible) continue;
+      const wanted2 = visible.devices.map((d) => d.toLowerCase());
+      const targets = visible.all ? view.units : view.units.filter((u) => wanted2.includes(u.label.toLowerCase()) || u.uuid !== "" && wanted2.includes(u.uuid.toLowerCase()));
+      for (const unit of targets) {
+        const consumer = { namespace: pod.metadata.namespace ?? "", pod: pod.metadata.name, claim: "", via: visible.env };
+        if (unit.consumers.some((c) => c.namespace === consumer.namespace && c.pod === consumer.pod)) continue;
+        unit.consumers.push(consumer);
+        if (unit.partitions.length === 0) unit.state = holdState(unit.claims, unit.consumers, false);
+        if (unit.consumers.every((c) => c.via)) unit.inferred = false;
+      }
+    }
+  }
   function isInUse(unit) {
     return unit.state === "allocated" || unit.state === "shared" || unit.state === "partial";
   }
@@ -852,7 +952,7 @@
       for (const cell of cells) {
         for (const c of cell.holders) {
           const key = `${c.namespace}/${c.pod}`;
-          heldByPod.set(key, [...heldByPod.get(key) ?? [], { unitId: unit.id, partitionId: cell.partitionId, label: cell.label, node: unit.node, model: unit.model, claim: "", inferred: true }]);
+          heldByPod.set(key, [...heldByPod.get(key) ?? [], { unitId: unit.id, partitionId: cell.partitionId, label: cell.label, node: unit.node, model: unit.model, claim: "", inferred: unit.inferred }]);
         }
       }
     }
@@ -1104,6 +1204,153 @@
     return `None of the ${count(Number(match[1]), "node")} can take it: ${list}.`;
   }
 
+  // src/model/dcgm.ts
+  var DCGM_CHARTS = {
+    /** The identity charts: every label DCGM writes, one series per card (and per pod on it). */
+    memoryUsed: "data-dcgm-memory-used",
+    util: "data-dcgm-util",
+    memoryFree: "data-dcgm-memory-free",
+    temperature: "data-dcgm-temperature",
+    power: "data-dcgm-power",
+    nvlink: "data-dcgm-nvlink"
+  };
+  function isDataChart(id) {
+    return id.startsWith("data-");
+  }
+  function noDcgm(error = "") {
+    return { gpus: [], status: { prometheus: false, found: false, mapping: false, describe: "", error, unmatched: [] } };
+  }
+  function parseLabels(name) {
+    const out = {};
+    const starts = [];
+    const pattern = /(?:^|, )([A-Za-z_][A-Za-z0-9_]*)=/g;
+    for (let match = pattern.exec(name); match; match = pattern.exec(name)) {
+      starts.push({ key: match[1] ?? "", at: match.index, from: match.index + match[0].length });
+    }
+    starts.forEach((start2, i) => {
+      const next = starts[i + 1];
+      out[start2.key] = name.slice(start2.from, next ? next.at : name.length);
+    });
+    return out;
+  }
+  function current(chart) {
+    if (!chart) return [];
+    const series = chart.series.filter((s) => s.points.length > 0);
+    const lastOf = (s) => s.points[s.points.length - 1];
+    const newest = Math.max(...series.map((s) => lastOf(s).t), 0);
+    const spacing = Math.max(
+      15,
+      ...series.map((s) => {
+        const n = s.points.length;
+        return n > 1 ? s.points[n - 1].t - s.points[n - 2].t : 0;
+      })
+    );
+    const cutoff = newest - Math.max(60, 3 * spacing);
+    return series.filter((s) => lastOf(s).t >= cutoff).map((s) => ({ labels: parseLabels(s.name), value: lastOf(s).v }));
+  }
+  function hostOf(labels) {
+    return labels["Hostname"] ?? labels["kubernetes_node"] ?? labels["node"] ?? "";
+  }
+  function nodeMatcher(nodes, hosts, gpuNodes) {
+    const names = nodes.map((n) => n.metadata.name);
+    const short = (name) => name.toLowerCase().split(".")[0] ?? "";
+    const distinct = [...new Set(hosts)];
+    return (host) => {
+      if (names.includes(host)) return host;
+      const lower = names.find((n) => n.toLowerCase() === host.toLowerCase());
+      if (lower) return lower;
+      const same = names.filter((n) => short(n) === short(host));
+      if (same.length === 1 && same[0]) return same[0];
+      if (distinct.length === 1 && gpuNodes.length === 1 && gpuNodes[0]) return gpuNodes[0];
+      return "";
+    };
+  }
+  function asksForDevices(pod) {
+    return Object.keys(podDeviceRequests(pod)).length > 0 || podClaims(pod).length > 0;
+  }
+  function readDcgm(panel, nodes, pods, gpuNodes = []) {
+    if (!panel) return noDcgm();
+    const status = { prometheus: panel.source.available, found: false, mapping: false, describe: panel.source.describe, error: panel.source.error, unmatched: [] };
+    if (!panel.source.available) return { gpus: [], status };
+    const byId2 = new Map(panel.charts.map((c) => [c.id, c]));
+    const used = current(byId2.get(DCGM_CHARTS.memoryUsed));
+    const util = current(byId2.get(DCGM_CHARTS.util));
+    const identity = [...used, ...util];
+    if (identity.length === 0) return { gpus: [], status };
+    status.found = true;
+    const matchNode = nodeMatcher(nodes, identity.map((s) => hostOf(s.labels)), gpuNodes);
+    const livePods = new Map(pods.filter(isLive).map((p) => [`${p.metadata.namespace ?? ""}/${p.metadata.name}`, p]));
+    const unmatched = /* @__PURE__ */ new Set();
+    const gpus = /* @__PURE__ */ new Map();
+    const keyOf = (labels) => `${hostOf(labels)}/${labels["UUID"] ?? labels["gpu"] ?? ""}`;
+    const gpuFor = (labels) => {
+      const key = keyOf(labels);
+      let gpu = gpus.get(key);
+      if (!gpu) {
+        const host = hostOf(labels);
+        const node = matchNode(host);
+        if (!node && host) unmatched.add(host);
+        gpu = {
+          node: node || host,
+          index: labels["gpu"] ?? "",
+          uuid: labels["UUID"] ?? "",
+          pciBus: labels["pci_bus_id"] ?? "",
+          model: labels["modelName"] ?? "",
+          device: labels["device"] ?? "",
+          driverVersion: labels["DCGM_FI_DRIVER_VERSION"] ?? "",
+          mig: false,
+          consumers: []
+        };
+        gpus.set(key, gpu);
+      }
+      return gpu;
+    };
+    for (const { labels } of identity) {
+      const gpu = gpuFor(labels);
+      if (labels["GPU_I_ID"] !== void 0 && labels["GPU_I_ID"] !== "") gpu.mig = true;
+      const consumer = consumerOf(labels, gpu.node, livePods);
+      if (consumer && !gpu.consumers.some((c) => c.namespace === consumer.namespace && c.pod === consumer.pod)) gpu.consumers.push(consumer);
+    }
+    const each = (samples, apply) => {
+      for (const { labels, value } of samples) {
+        const gpu = gpus.get(keyOf(labels));
+        if (gpu) apply(gpu, value, labels);
+      }
+    };
+    const mib = 1024 ** 2;
+    const perCard = /* @__PURE__ */ new Set();
+    each(used, (gpu, v, labels) => {
+      const key = `${gpu.node}/${gpu.uuid}/${labels["GPU_I_ID"] ?? ""}`;
+      if (perCard.has(key)) return;
+      perCard.add(key);
+      gpu.memoryUsed = (gpu.memoryUsed ?? 0) + v * mib;
+    });
+    each(util, (gpu, v) => gpu.util = Math.max(gpu.util ?? 0, v / 100));
+    each(current(byId2.get(DCGM_CHARTS.memoryFree)), (gpu, v) => gpu.memoryFree = (gpu.memoryFree ?? 0) + v * mib);
+    each(current(byId2.get(DCGM_CHARTS.temperature)), (gpu, v) => gpu.temperature = v);
+    each(current(byId2.get(DCGM_CHARTS.power)), (gpu, v) => gpu.power = v);
+    each(current(byId2.get(DCGM_CHARTS.nvlink)), (gpu, v) => gpu.nvlink = v);
+    const list = [...gpus.values()].sort((a, b) => a.node.localeCompare(b.node) || Number(a.index) - Number(b.index) || a.uuid.localeCompare(b.uuid));
+    status.mapping = list.some((g) => g.consumers.length > 0);
+    status.unmatched = [...unmatched].sort();
+    return { gpus: list, status };
+  }
+  function consumerOf(labels, node, pods) {
+    const candidates = [
+      [labels["exported_namespace"] ?? "", labels["exported_pod"] ?? "", labels["exported_container"] ?? ""],
+      [labels["namespace"] ?? "", labels["pod"] ?? "", labels["container"] ?? ""]
+    ];
+    for (const [namespace, name, container] of candidates) {
+      if (!namespace || !name) continue;
+      const pod = pods.get(`${namespace}/${name}`);
+      if (!pod) continue;
+      if (node && pod.spec?.nodeName && pod.spec.nodeName !== node) continue;
+      if (!asksForDevices(pod)) continue;
+      return { namespace, pod: name, container };
+    }
+    return void 0;
+  }
+
   // src/ui/dom.ts
   function el(tag, attrs = {}, ...children) {
     const node = document.createElement(tag);
@@ -1318,6 +1565,7 @@
       return null;
     }
     if (!panel.attached) return null;
+    panel = { ...panel, charts: panel.charts.filter((chart) => !isDataChart(chart.id)) };
     const title = "From DCGM, the last three hours";
     if (!panel.source.available) {
       return block(
@@ -1448,6 +1696,31 @@
   function servesDra(snap) {
     return !snap.missing[SLICES];
   }
+  function dcgmReader(minutes = 10, every2 = 45e3) {
+    let panel = null;
+    let asked = 0;
+    let failure = "";
+    return async (snap, gpuNodes = []) => {
+      if (!panel || Date.now() - asked >= every2) {
+        asked = Date.now();
+        try {
+          panel = await k8sdockside.charts({ minutes });
+          failure = "";
+        } catch (err) {
+          failure = message(err);
+        }
+      }
+      return { dcgm: panel ? readDcgm(panel, snap.nodes, snap.pods, gpuNodes) : noDcgm(failure), panel };
+    };
+  }
+  async function inventoryWithDcgm(snap, read) {
+    const plain = buildInventory(snap);
+    const metrics = await read(
+      snap,
+      plain.nodes.map((n) => n.name).filter((n) => n !== "")
+    );
+    return { ...metrics, inventory: metrics.dcgm.gpus.length ? buildInventory(snap, metrics.dcgm.gpus) : plain };
+  }
 
   // src/pages/overview.ts
   var REFRESH = 15e3;
@@ -1456,11 +1729,12 @@
     const body = byId("body");
     const failure = el("p", { class: "refresh-failure" });
     const charts = chartsBlock();
+    const read = dcgmReader();
     const stop = every(
       REFRESH,
       async () => {
         const snap = await loadSnapshot();
-        const inventory = buildInventory(snap);
+        const { inventory } = await inventoryWithDcgm(snap, read);
         const work = buildWorkloads(snap, inventory);
         const daemons = acceleratorDaemons(snap.daemonSets);
         failure.textContent = "";

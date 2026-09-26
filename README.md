@@ -44,6 +44,41 @@ What keeps the numbers honest, each covered by a test in `src/model/`:
 
 ## What it shows
 
+**GPUs** — every card from every source that can describe it, as one
+picture, per machine: a card per GPU in nvidia-smi's order with its model,
+UUID, PCI bus, memory in use, utilisation, temperature and power; cards that
+share an NVLink framed together; and on each card the model it is serving —
+`nhn-large`, `openai/gpt-oss-120b`, vLLM, TP 2 — and the pod serving it, with
+vLLM's own requests and KV cache when Prometheus scrapes it. Then the same as
+tables (the models on the GPUs; the cards with their UUIDs and PCI
+addresses; the NVLinks), a list of what each source contributed, and all of
+it as plain text to paste into a ticket.
+
+![The GPUs page](docs/screenshots/gpus-light.png)
+
+No single source knows all of that, so each one fills in what it can:
+
+| Source | What it adds |
+| --- | --- |
+| Device plugin | how many GPUs a node has, and how many each pod asked for |
+| DRA | exactly which device each claim holds, with its UUID |
+| GFD node labels | model, memory, driver and CUDA versions |
+| DCGM exporter, via Prometheus | each card's index, UUID and PCI bus, **which pod has it** (pod mapping), and its live numbers |
+| The pods' env | the cards a pod picks with `NVIDIA_VISIBLE_DEVICES` or `CUDA_VISIBLE_DEVICES` when it asks the scheduler for none (NVIDIA's runtime class) — drawn on those cards, with a warning that the scheduler still counts them free |
+| The pods' command lines | which model an inference server has loaded: vLLM, SGLang, TGI, TensorRT-LLM, llama.cpp, NIM, KServe, Triton (Ollama is named as a server; it pulls models at run time) |
+| `nvidia-smi topo -m`, pasted in | which GPUs share an NVLink — kept per node for the cluster |
+| The model | when nothing is pasted: H100/H200 NVL cards are bridged in pairs (read from their order, and drawn dashed as a guess), SXM parts sit on NVSwitch, L4/L40S/T4/A10 have no NVLink |
+
+When a card cannot be read -- nothing names the model, a server asks the
+scheduler for no GPU and names none in its env, or names one by a UUID
+nothing here knows -- a note under the machine says so, and what would fix
+it.
+
+With DCGM's pod mapping in Prometheus, the device-plugin path is no longer a
+count: every page — Dashboard, Inventory, the panels — puts each pod on the
+card it really has. Without it, the cards are still placed by count and
+marked `~`.
+
 **Dashboard** — four big tiles: accelerators, in use, free, and what pending
 pods are waiting for. The whole fleet as one bar (in use, partly used by MIG,
 shared, free, unhealthy); every model as a row — `25× H100 80GB HBM3`, with
@@ -90,15 +125,15 @@ given and on which node, the pods using it, and the template it came from).
 | --- | --- | --- |
 | ![Node panel](docs/screenshots/node-light.png) | ![Pod panel](docs/screenshots/pod-dark.png) | ![Claim panel](docs/screenshots/claim-light.png) |
 
-The four DRA kinds also get their own tables in the sidebar, plus the nodes
-GFD labels `nvidia.com/gpu.present=true`.
+The four DRA kinds also get their own tables in the sidebar.
 
 Every page is also shot in the other theme in
 [`docs/screenshots/`](docs/screenshots/).
 
 ## What it reads, and what it changes
 
-It reads Nodes, Pods, DaemonSets and Events, and the `resource.k8s.io` kinds
+It reads Nodes, Pods (including their containers' images, command lines and
+literal env values, to recognise inference servers), DaemonSets and Events, and the `resource.k8s.io` kinds
 — ResourceSlices, ResourceClaims, ResourceClaimTemplates and DeviceClasses —
 at whatever version the cluster serves (`v1` from 1.34; the `v1beta1` shape
 of 1.32 is read too). On a cluster that does not serve `resource.k8s.io` at
@@ -107,9 +142,17 @@ for the scheduler's `FailedScheduling` message when a pod's condition has
 none. It never reads Secrets: the app refuses that for every plugin.
 
 **It changes nothing.** There are no actions and the manifest does not ask to
-write.
+write. A pasted NVLink topology is kept in the app's own settings for the
+plugin and cluster, never in the cluster.
 
 ### Charts
+
+Ten charts are declared with ids starting `data-` and never drawn: they are
+how the GPUs page gets DCGM's per-card labels and vLLM's `/metrics` out of
+Prometheus, since a chart with no `legend` hands a plugin every label of
+each series. They are PromQL like any other chart — `max by (Hostname, gpu,
+UUID, pci_bus_id, …) (DCGM_FI_DEV_FB_USED)` and so on — and are read at most
+every 45 seconds.
 
 Five overview charts, drawn from the cluster's Prometheus if it scrapes
 NVIDIA's [DCGM exporter](https://github.com/NVIDIA/dcgm-exporter) (the GPU

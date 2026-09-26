@@ -6,6 +6,7 @@
 // at all, a Prometheus with no DCGM exporter feeding it, and a chart whose
 // query failed on its own.
 
+import { isDataChart } from '../model/dcgm.js';
 import { el } from './dom.js';
 import { block, svgEl } from './parts.js';
 
@@ -58,6 +59,8 @@ export async function chartsBlock(): Promise<HTMLElement | null> {
         return null;
     }
     if (!panel.attached) return null;
+    // The `data-` charts are read by the GPUs page for their labels, not drawn.
+    panel = { ...panel, charts: panel.charts.filter((chart) => !isDataChart(chart.id)) };
     const title = 'From DCGM, the last three hours';
     if (!panel.source.available) {
         return block(

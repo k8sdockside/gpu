@@ -1,10 +1,9 @@
 // The panel on a Pod: the accelerators it has, or is waiting for, and why.
 
-import { buildInventory } from '../model/inventory.js';
 import { CLAIMS, NODES, type Pod } from '../model/kube.js';
 import { buildWorkloads } from '../model/workloads.js';
 import { byId, el, replace } from '../ui/dom.js';
-import { loadSnapshot } from '../ui/load.js';
+import { dcgmReader, inventoryWithDcgm, loadSnapshot } from '../ui/load.js';
 import { remember, start } from '../ui/page.js';
 import { clickable, facts, nothing, openName, pill } from '../ui/parts.js';
 
@@ -12,7 +11,8 @@ start('panel', async () => {
     const host = byId('panel');
     const pod = await k8sdockside.object<Pod>();
     const snap = await loadSnapshot({ daemonSets: false });
-    const view = buildWorkloads(snap, buildInventory(snap)).pods.find((p) => p.namespace === (pod.metadata.namespace ?? '') && p.name === pod.metadata.name);
+    const { inventory } = await inventoryWithDcgm(snap, dcgmReader());
+    const view = buildWorkloads(snap, inventory).pods.find((p) => p.namespace === (pod.metadata.namespace ?? '') && p.name === pod.metadata.name);
 
     if (!view) {
         replace(host, nothing('This pod asks for no accelerator: no GPU in its limits and no ResourceClaim.'));

@@ -63,8 +63,18 @@ export interface ResourceRequirements {
     claims?: { name?: string; request?: string }[];
 }
 
+export interface EnvVar {
+    name?: string;
+    /** Only a literal value is read: one from a Secret or ConfigMap is not the page's to see. */
+    value?: string;
+}
+
 export interface Container {
     name?: string;
+    image?: string;
+    command?: string[];
+    args?: string[];
+    env?: EnvVar[];
     resources?: ResourceRequirements;
 }
 
@@ -78,6 +88,8 @@ export interface Pod extends K8sDockside.KubeObject {
     metadata: Meta;
     spec?: {
         nodeName?: string;
+        /** `nvidia` hands a container the GPUs its env names, without the scheduler knowing. */
+        runtimeClassName?: string;
         containers?: Container[];
         initContainers?: (Container & { restartPolicy?: string })[];
         resourceClaims?: PodResourceClaim[];

@@ -9,12 +9,11 @@
 // DeviceClasses they ask for.
 
 import { classDriver, type RequestView } from '../model/dra.js';
-import { buildInventory } from '../model/inventory.js';
 import { CLAIMS, CLASSES, NODES, PODS, TEMPLATES, type DeviceClass } from '../model/kube.js';
 import { count } from '../model/units.js';
 import { buildWorkloads, type ClaimView, type Held, type PodView, type TemplateView, type Workloads } from '../model/workloads.js';
 import { byId, el, replace } from '../ui/dom.js';
-import { loadSnapshot, servesDra } from '../ui/load.js';
+import { dcgmReader, inventoryWithDcgm, loadSnapshot, servesDra } from '../ui/load.js';
 import { ago, every, message, remember, start } from '../ui/page.js';
 import { block, clickable, heading, nothing, openName, pill, tile } from '../ui/parts.js';
 
@@ -52,11 +51,12 @@ start('page', async (ctx) => {
         );
     };
 
+    const read = dcgmReader();
     const stop = every(
         REFRESH,
         async () => {
             const snap = await loadSnapshot({ daemonSets: false });
-            const inventory = buildInventory(snap);
+            const { inventory } = await inventoryWithDcgm(snap, read);
             last = { work: buildWorkloads(snap, inventory), classes: snap.classes, dra: servesDra(snap) };
             failure.textContent = '';
             document.getElementById('first')?.remove();

@@ -20,6 +20,7 @@ const APP = path.resolve(ROOT, '../k8sdockside');
 const PAGE = '<div id="page"><div id="head"></div><div id="bar" class="bar"></div><p id="first"></p><div id="body"></div></div>';
 const PAGES = [
     ['overview', 'Dashboard', 'page', PAGE],
+    ['gpus', 'GPUs', 'page', PAGE],
     ['inventory', 'Inventory', 'page', PAGE],
     ['workloads', 'Claims & workloads', 'page', PAGE],
     ['node', 'Panel: Node', 'panel', '<div id="panel"></div>'],
@@ -61,6 +62,13 @@ const fixtures = await load(path.join(ROOT, 'src/fixtures.ts'));
 const css = readFileSync(path.join(ROOT, 'ui/gpu.css'), 'utf8');
 const logo = readFileSync(path.join(ROOT, 'ui/logo.svg'), 'utf8');
 
+// The GPUs page is drawn against one machine as it really is -- four H100 NVL
+// bridged in pairs, three vLLM servers, DCGM with pod mapping -- since that is
+// the picture it is for; every other page against the whole fixture fleet.
+const CLUSTERS = {
+    gpus: { lists: fixtures.nvlLists, charts: fixtures.nvlCharts() },
+};
+
 const OBJECTS = {
     node: fixtures.panelObjects.node,
     pod: fixtures.panelObjects.pod,
@@ -71,7 +79,7 @@ const OBJECTS = {
 // something in it: the H100 two vLLM replicas share.
 const STORAGE = { 'inventory.pin': 'dra/gpu.nvidia.com/dgx-h100-02/gpu-3' };
 
-function stub(theme, object) {
+function stub(theme, object, cluster = { lists: fixtures.LISTS, charts: fixtures.chartsPanel }) {
     return {
         ready: async () => ({
             pluginId: 'gpu', viewId: '', sectionId: '', object: null,
@@ -80,14 +88,14 @@ function stub(theme, object) {
             plugin: { id: 'gpu', name: 'GPU & Accelerators', version: '1.0.0', docs: '', links: [], author: 'K8s Dockside', authorUrl: '' },
         }),
         object: async () => object,
-        list: async ({ kind }) => { if (!(kind in fixtures.LISTS)) throw new Error(`the cluster does not serve ${kind}`); return fixtures.LISTS[kind]; },
+        list: async ({ kind }) => { if (!(kind in cluster.lists)) throw new Error(`the cluster does not serve ${kind}`); return cluster.lists[kind]; },
         get: async () => object,
         open: async () => null, openView: async () => null, openUrl: async () => null,
         summary: async () => ({ pluginId: 'gpu', installed: true, checked: true, requirements: [], cards: [], error: '' }),
         storage: { get: async (key) => STORAGE[key] ?? null, set: async () => null, remove: async () => null, keys: async () => [] },
         actions: async () => [], run: async () => ({ created: '' }), resize: async () => null,
         watch: () => () => {}, namespaces: async () => [],
-        charts: async () => fixtures.chartsPanel,
+        charts: async () => cluster.charts,
         patch: async () => null, create: async () => ({ name: '' }),
         edit: async () => null, logs: async () => null, on: () => () => {},
     };
@@ -113,7 +121,7 @@ async function render(page, body, theme, object) {
         const value = typeof win[key] === 'function' && key.endsWith('EventListener') ? win[key].bind(win) : win[key];
         Object.defineProperty(globalThis, key, { value, configurable: true, writable: true });
     }
-    Object.defineProperty(globalThis, 'k8sdockside', { value: stub(theme, object), configurable: true, writable: true });
+    Object.defineProperty(globalThis, 'k8sdockside', { value: stub(theme, object, CLUSTERS[page[0]]), configurable: true, writable: true });
 
     // Each page is bundled fresh: a page runs its work on import, and an
     // already-imported module would not run again.

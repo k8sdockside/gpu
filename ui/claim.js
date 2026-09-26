@@ -18,6 +18,175 @@
     return `${n} ${n === 1 ? noun : plural}`;
   }
 
+  // src/model/vendors.ts
+  var VENDOR_NAMES = {
+    nvidia: "NVIDIA",
+    amd: "AMD",
+    intel: "Intel",
+    habana: "Intel Gaudi",
+    aws: "AWS Neuron",
+    google: "Google TPU",
+    example: "Simulated (example driver)",
+    other: "Other"
+  };
+  var DEVICE_RESOURCES = [
+    [/^nvidia\.com\/gpu(\.shared)?$/, "nvidia"],
+    [/^nvidia\.com\/mig-\d+(c\.\d+)?g\.\d+gb(\+[a-z]+)?$/, "nvidia"],
+    [/^amd\.com\/gpu$/, "amd"],
+    [/^gpu\.intel\.com\/(i915|xe)$/, "intel"],
+    [/^habana\.ai\/gaudi$/, "habana"],
+    [/^aws\.amazon\.com\/neuron(device)?$/, "aws"],
+    [/^google\.com\/tpu$/, "google"]
+  ];
+  function isDeviceResource(name) {
+    return DEVICE_RESOURCES.some(([pattern]) => pattern.test(name));
+  }
+  function resourceVendor(name) {
+    return DEVICE_RESOURCES.find(([pattern]) => pattern.test(name))?.[1];
+  }
+  function driverVendor(driver) {
+    const name = driver.toLowerCase();
+    if (name === "gpu.example.com" || name.endsWith(".example.com")) return "example";
+    if (/(^|\.)nvidia\.com$/.test(name)) return "nvidia";
+    if (/(^|\.)amd\.com$/.test(name)) return "amd";
+    if (/(^|\.)habana\.ai$/.test(name)) return "habana";
+    if (/(^|\.)intel\.com$/.test(name)) return "intel";
+    if (/(^|\.)(amazon|aws)\.com$/.test(name)) return "aws";
+    if (/(^|\.)google\.com$/.test(name)) return "google";
+    return "other";
+  }
+  function isAcceleratorDriver(driver) {
+    return !/^compute-domain\./.test(driver);
+  }
+  function parseMigProfile(text) {
+    const match = /^(?:mig-)?(?:(\d+)c\.)?(\d+)g\.(\d+)gb(\+[a-z]+)?$/i.exec(text.trim());
+    if (!match) return void 0;
+    const slices = Number(match[2]);
+    const gigabytes = Number(match[3]);
+    if (!(slices > 0)) return void 0;
+    return { name: text.replace(/^mig-/, ""), slices, gigabytes };
+  }
+  function migResourceProfile(resource) {
+    const match = /^nvidia\.com\/mig-(.+)$/.exec(resource);
+    return match ? parseMigProfile(match[1] ?? "") : void 0;
+  }
+  function migSlicesFor(product) {
+    return /\bA30\b/i.test(product.replace(/[-_]/g, " ")) ? 4 : 7;
+  }
+  function friendlyModel(raw) {
+    let name = raw.trim();
+    if (!name) return "";
+    name = name.replace(/-SHARED$/, "").replace(/[_-]+/g, " ");
+    name = name.replace(/^(NVIDIA|AMD|Intel\(R\)|Intel)\s+/i, "");
+    return name.replace(/\s+/g, " ").trim();
+  }
+  function nodeCard(labels) {
+    const l = labels ?? {};
+    const num = (key) => {
+      const n = Number(l[key]);
+      return Number.isFinite(n) && n > 0 ? n : 0;
+    };
+    const joined = (...keys) => {
+      const parts = keys.map((key) => l[key]).filter((v) => v !== void 0 && v !== "");
+      return parts.length === keys.length ? parts.join(".") : "";
+    };
+    const product = l["nvidia.com/gpu.product"] ?? l["amd.com/gpu.product-name"] ?? l["beta.amd.com/gpu.product-name"] ?? "";
+    const mib = num("nvidia.com/gpu.memory");
+    const amdVram = l["amd.com/gpu.vram"] ?? l["beta.amd.com/gpu.vram"] ?? "";
+    return {
+      product,
+      memory: mib > 0 ? mib * 1024 ** 2 : amdVram ? vram(amdVram) : 0,
+      count: num("nvidia.com/gpu.count"),
+      replicas: Math.max(1, num("nvidia.com/gpu.replicas")),
+      sharing: l["nvidia.com/gpu.sharing-strategy"] ?? "",
+      driverVersion: l["nvidia.com/cuda.driver-version.full"] ?? (joined("nvidia.com/cuda.driver.major", "nvidia.com/cuda.driver.minor", "nvidia.com/cuda.driver.rev") || l["amd.com/gpu.driver-version"] || ""),
+      cudaVersion: l["nvidia.com/cuda.runtime-version.full"] ?? joined("nvidia.com/cuda.runtime.major", "nvidia.com/cuda.runtime.minor"),
+      migStrategy: l["nvidia.com/mig.strategy"] ?? ""
+    };
+  }
+  function vram(text) {
+    const match = /^(\d+(?:\.\d+)?)\s*([GMT])i?B?$/i.exec(text.trim());
+    if (!match) return 0;
+    const n = Number(match[1]);
+    const unit = (match[2] ?? "G").toUpperCase();
+    return n * (unit === "T" ? 1024 ** 4 : unit === "M" ? 1024 ** 2 : 1024 ** 3);
+  }
+  function resourceNoun(resource) {
+    const mig = migResourceProfile(resource);
+    if (mig) return `MIG ${mig.name}`;
+    if (resource === "habana.ai/gaudi") return "Gaudi";
+    if (resource.startsWith("aws.amazon.com/")) return "Neuron device";
+    if (resource === "google.com/tpu") return "TPU";
+    return "GPU";
+  }
+
+  // src/model/requests.ts
+  var CLASS_RESOURCE_PREFIX = "deviceclass.resource.kubernetes.io/";
+  function isAcceleratorRequest(name, classResources = /* @__PURE__ */ new Set()) {
+    return isDeviceResource(name) || name.startsWith(CLASS_RESOURCE_PREFIX) || classResources.has(name);
+  }
+  function podDeviceRequests(pod, classResources = /* @__PURE__ */ new Set()) {
+    const running = {};
+    const add = (into, container) => {
+      for (const [name, amount] of Object.entries(wanted(container))) {
+        if (isAcceleratorRequest(name, classResources)) into[name] = (into[name] ?? 0) + amount;
+      }
+    };
+    for (const container of pod.spec?.containers ?? []) add(running, container);
+    const inits = pod.spec?.initContainers ?? [];
+    for (const container of inits) if (container.restartPolicy === "Always") add(running, container);
+    const out = { ...running };
+    for (const container of inits) {
+      if (container.restartPolicy === "Always") continue;
+      const alone = {};
+      add(alone, container);
+      for (const [name, amount] of Object.entries(alone)) out[name] = Math.max(out[name] ?? 0, amount);
+    }
+    return out;
+  }
+  function wanted(container) {
+    const out = {};
+    for (const [name, value] of Object.entries(container.resources?.requests ?? {})) out[name] = quantity(value);
+    for (const [name, value] of Object.entries(container.resources?.limits ?? {})) out[name] = quantity(value);
+    return out;
+  }
+  function podClaims(pod) {
+    const statuses = new Map((pod.status?.resourceClaimStatuses ?? []).map((s) => [s.name ?? "", s.resourceClaimName ?? ""]));
+    const out = (pod.spec?.resourceClaims ?? []).map((c) => ({
+      entry: c.name ?? "",
+      claim: c.resourceClaimName ?? statuses.get(c.name ?? "") ?? "",
+      template: c.resourceClaimTemplateName ?? ""
+    }));
+    const extended = pod.status?.extendedResourceClaimStatus?.resourceClaimName;
+    if (extended) out.push({ entry: "(extended resource)", claim: extended, template: "" });
+    return out;
+  }
+
+  // src/model/visible.ts
+  var VISIBLE_ENV = ["NVIDIA_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"];
+  function parseVisible(value) {
+    const text = value.trim();
+    if (!text || /^(none|void|NoDevFiles)$/i.test(text)) return void 0;
+    if (/^all$/i.test(text)) return { all: true, devices: [] };
+    const devices = text.split(",").map((d) => d.trim()).filter((d) => /^\d+$/.test(d) || /^(GPU|MIG)-[0-9a-f-]+$/i.test(d));
+    return devices.length ? { all: false, devices } : void 0;
+  }
+  function asksScheduler(pod) {
+    return Object.keys(podDeviceRequests(pod)).length > 0 || podClaims(pod).length > 0;
+  }
+  function visibleDevices(pod) {
+    if (asksScheduler(pod)) return void 0;
+    for (const container of pod.spec?.containers ?? []) {
+      for (const name of VISIBLE_ENV) {
+        const value = container.env?.find((e) => e.name === name)?.value;
+        if (value === void 0) continue;
+        const parsed = parseVisible(value);
+        if (parsed) return { ...parsed, env: name, container: container.name ?? "" };
+      }
+    }
+    return void 0;
+  }
+
   // src/model/dra.ts
   function deviceKey(driver, pool, device) {
     return `${driver}/${pool}/${device}`;
@@ -174,152 +343,8 @@
     return (pod.status?.phase ?? "Pending") === "Pending" && !pod.spec?.nodeName;
   }
 
-  // src/model/vendors.ts
-  var VENDOR_NAMES = {
-    nvidia: "NVIDIA",
-    amd: "AMD",
-    intel: "Intel",
-    habana: "Intel Gaudi",
-    aws: "AWS Neuron",
-    google: "Google TPU",
-    example: "Simulated (example driver)",
-    other: "Other"
-  };
-  var DEVICE_RESOURCES = [
-    [/^nvidia\.com\/gpu(\.shared)?$/, "nvidia"],
-    [/^nvidia\.com\/mig-\d+(c\.\d+)?g\.\d+gb(\+[a-z]+)?$/, "nvidia"],
-    [/^amd\.com\/gpu$/, "amd"],
-    [/^gpu\.intel\.com\/(i915|xe)$/, "intel"],
-    [/^habana\.ai\/gaudi$/, "habana"],
-    [/^aws\.amazon\.com\/neuron(device)?$/, "aws"],
-    [/^google\.com\/tpu$/, "google"]
-  ];
-  function isDeviceResource(name) {
-    return DEVICE_RESOURCES.some(([pattern]) => pattern.test(name));
-  }
-  function resourceVendor(name) {
-    return DEVICE_RESOURCES.find(([pattern]) => pattern.test(name))?.[1];
-  }
-  function driverVendor(driver) {
-    const name = driver.toLowerCase();
-    if (name === "gpu.example.com" || name.endsWith(".example.com")) return "example";
-    if (/(^|\.)nvidia\.com$/.test(name)) return "nvidia";
-    if (/(^|\.)amd\.com$/.test(name)) return "amd";
-    if (/(^|\.)habana\.ai$/.test(name)) return "habana";
-    if (/(^|\.)intel\.com$/.test(name)) return "intel";
-    if (/(^|\.)(amazon|aws)\.com$/.test(name)) return "aws";
-    if (/(^|\.)google\.com$/.test(name)) return "google";
-    return "other";
-  }
-  function isAcceleratorDriver(driver) {
-    return !/^compute-domain\./.test(driver);
-  }
-  function parseMigProfile(text) {
-    const match = /^(?:mig-)?(?:(\d+)c\.)?(\d+)g\.(\d+)gb(\+[a-z]+)?$/i.exec(text.trim());
-    if (!match) return void 0;
-    const slices = Number(match[2]);
-    const gigabytes = Number(match[3]);
-    if (!(slices > 0)) return void 0;
-    return { name: text.replace(/^mig-/, ""), slices, gigabytes };
-  }
-  function migResourceProfile(resource) {
-    const match = /^nvidia\.com\/mig-(.+)$/.exec(resource);
-    return match ? parseMigProfile(match[1] ?? "") : void 0;
-  }
-  function migSlicesFor(product) {
-    return /\bA30\b/i.test(product.replace(/[-_]/g, " ")) ? 4 : 7;
-  }
-  function friendlyModel(raw) {
-    let name = raw.trim();
-    if (!name) return "";
-    name = name.replace(/-SHARED$/, "").replace(/[_-]+/g, " ");
-    name = name.replace(/^(NVIDIA|AMD|Intel\(R\)|Intel)\s+/i, "");
-    return name.replace(/\s+/g, " ").trim();
-  }
-  function nodeCard(labels) {
-    const l = labels ?? {};
-    const num = (key) => {
-      const n = Number(l[key]);
-      return Number.isFinite(n) && n > 0 ? n : 0;
-    };
-    const joined = (...keys) => {
-      const parts = keys.map((key) => l[key]).filter((v) => v !== void 0 && v !== "");
-      return parts.length === keys.length ? parts.join(".") : "";
-    };
-    const product = l["nvidia.com/gpu.product"] ?? l["amd.com/gpu.product-name"] ?? l["beta.amd.com/gpu.product-name"] ?? "";
-    const mib = num("nvidia.com/gpu.memory");
-    const amdVram = l["amd.com/gpu.vram"] ?? l["beta.amd.com/gpu.vram"] ?? "";
-    return {
-      product,
-      memory: mib > 0 ? mib * 1024 ** 2 : amdVram ? vram(amdVram) : 0,
-      count: num("nvidia.com/gpu.count"),
-      replicas: Math.max(1, num("nvidia.com/gpu.replicas")),
-      sharing: l["nvidia.com/gpu.sharing-strategy"] ?? "",
-      driverVersion: l["nvidia.com/cuda.driver-version.full"] ?? (joined("nvidia.com/cuda.driver.major", "nvidia.com/cuda.driver.minor", "nvidia.com/cuda.driver.rev") || l["amd.com/gpu.driver-version"] || ""),
-      cudaVersion: l["nvidia.com/cuda.runtime-version.full"] ?? joined("nvidia.com/cuda.runtime.major", "nvidia.com/cuda.runtime.minor"),
-      migStrategy: l["nvidia.com/mig.strategy"] ?? ""
-    };
-  }
-  function vram(text) {
-    const match = /^(\d+(?:\.\d+)?)\s*([GMT])i?B?$/i.exec(text.trim());
-    if (!match) return 0;
-    const n = Number(match[1]);
-    const unit = (match[2] ?? "G").toUpperCase();
-    return n * (unit === "T" ? 1024 ** 4 : unit === "M" ? 1024 ** 2 : 1024 ** 3);
-  }
-  function resourceNoun(resource) {
-    const mig = migResourceProfile(resource);
-    if (mig) return `MIG ${mig.name}`;
-    if (resource === "habana.ai/gaudi") return "Gaudi";
-    if (resource.startsWith("aws.amazon.com/")) return "Neuron device";
-    if (resource === "google.com/tpu") return "TPU";
-    return "GPU";
-  }
-
-  // src/model/requests.ts
-  var CLASS_RESOURCE_PREFIX = "deviceclass.resource.kubernetes.io/";
-  function isAcceleratorRequest(name, classResources = /* @__PURE__ */ new Set()) {
-    return isDeviceResource(name) || name.startsWith(CLASS_RESOURCE_PREFIX) || classResources.has(name);
-  }
-  function podDeviceRequests(pod, classResources = /* @__PURE__ */ new Set()) {
-    const running = {};
-    const add = (into, container) => {
-      for (const [name, amount] of Object.entries(wanted(container))) {
-        if (isAcceleratorRequest(name, classResources)) into[name] = (into[name] ?? 0) + amount;
-      }
-    };
-    for (const container of pod.spec?.containers ?? []) add(running, container);
-    const inits = pod.spec?.initContainers ?? [];
-    for (const container of inits) if (container.restartPolicy === "Always") add(running, container);
-    const out = { ...running };
-    for (const container of inits) {
-      if (container.restartPolicy === "Always") continue;
-      const alone = {};
-      add(alone, container);
-      for (const [name, amount] of Object.entries(alone)) out[name] = Math.max(out[name] ?? 0, amount);
-    }
-    return out;
-  }
-  function wanted(container) {
-    const out = {};
-    for (const [name, value] of Object.entries(container.resources?.requests ?? {})) out[name] = quantity(value);
-    for (const [name, value] of Object.entries(container.resources?.limits ?? {})) out[name] = quantity(value);
-    return out;
-  }
-  function podClaims(pod) {
-    const statuses = new Map((pod.status?.resourceClaimStatuses ?? []).map((s) => [s.name ?? "", s.resourceClaimName ?? ""]));
-    const out = (pod.spec?.resourceClaims ?? []).map((c) => ({
-      entry: c.name ?? "",
-      claim: c.resourceClaimName ?? statuses.get(c.name ?? "") ?? "",
-      template: c.resourceClaimTemplateName ?? ""
-    }));
-    const extended = pod.status?.extendedResourceClaimStatus?.resourceClaimName;
-    if (extended) out.push({ entry: "(extended resource)", claim: extended, template: "" });
-    return out;
-  }
-
   // src/model/inventory.ts
-  function buildInventory(snap) {
+  function buildInventory(snap, dcgm = []) {
     const nodesByName = new Map(snap.nodes.map((node) => [node.metadata.name, node]));
     const devices = sliceDevices(snap.slices).filter((d) => isAcceleratorDriver(d.driver));
     const byKey = /* @__PURE__ */ new Map();
@@ -356,6 +381,8 @@
       const units2 = unitsFromNode(node, podsByNode.get(node.metadata.name) ?? [], draVendors, (note) => view(node.metadata.name).notes.push(note));
       if (units2.length) view(node.metadata.name).units.push(...units2);
     }
+    if (dcgm.length) applyDcgm([...views.values()], dcgm);
+    applyVisible([...views.values()], snap.pods);
     const nodes = [...views.values()].filter((v) => v.units.length > 0).sort((a, b) => a.name === "" ? 1 : b.name === "" ? -1 : a.name.localeCompare(b.name, void 0, { numeric: true }));
     const units = nodes.flatMap((n) => n.units);
     return { nodes, units, totals: totals(units), byModel: tally(units, (u) => modelKey(u)), byVendor: tally(units, (u) => [u.vendor, VENDOR_NAMES[u.vendor]]), byKey };
@@ -376,6 +403,8 @@
       sharing: "",
       inferred: false,
       problem: "",
+      uuid: "",
+      pciBus: "",
       ...partial
     };
   }
@@ -397,6 +426,8 @@
       driverVersion: device.attributes["driverVersion"] ?? "",
       cudaVersion: device.attributes["cudaDriverVersion"] ?? "",
       device,
+      uuid: device.attributes["uuid"] ?? "",
+      pciBus: device.attributes["pcieBusID"] ?? device.attributes["pciBusID"] ?? device.attributes["pciAddress"] ?? "",
       problem: device.tainted ? `The driver has tainted this device (${device.tainted}): the scheduler will not hand it out.` : ""
     });
   }
@@ -669,6 +700,75 @@
     }
     return units;
   }
+  function applyDcgm(views, gpus) {
+    const byNode = /* @__PURE__ */ new Map();
+    for (const gpu of gpus) byNode.set(gpu.node, [...byNode.get(gpu.node) ?? [], gpu]);
+    for (const view of views) {
+      const list = (byNode.get(view.name) ?? []).sort((a, b) => Number(a.index) - Number(b.index));
+      if (!list.length) continue;
+      const taken = /* @__PURE__ */ new Set();
+      for (const unit of view.units) {
+        if (unit.source !== "dra" || !unit.uuid) continue;
+        const gpu = list.find((g) => g.uuid === unit.uuid);
+        if (!gpu) continue;
+        taken.add(gpu);
+        describe(unit, gpu);
+      }
+      const counted = view.units.filter((u) => u.source === "device-plugin" && u.vendor === "nvidia" && u.partitions.length === 0);
+      const cards = list.filter((g) => !taken.has(g) && !g.mig);
+      if (!counted.length || !cards.length) continue;
+      if (cards.length !== counted.length) {
+        view.notes.push(`DCGM reports ${cards.length} ${cards.length === 1 ? "GPU" : "GPUs"} here and the device plugin advertises ${counted.length}: ${cards.length > counted.length ? "some cards are not handed out" : "some cards are not reported"}, so which card is which is matched in order.`);
+      }
+      const mapped = cards.some((g) => g.consumers.length > 0);
+      counted.forEach((unit, i) => {
+        const gpu = cards[i];
+        if (!gpu) return;
+        describe(unit, gpu);
+        unit.label = gpu.index || unit.label;
+        unit.name = gpu.index ? `GPU ${gpu.index}` : unit.name;
+        if (!mapped) return;
+        unit.consumers = gpu.consumers.map((c) => ({ namespace: c.namespace, pod: c.pod, claim: "" }));
+        unit.inferred = false;
+        if (unit.consumers.length) unit.state = holdState([], unit.consumers, false);
+        else if (unit.state !== "unhealthy") unit.state = "free";
+      });
+    }
+  }
+  function describe(unit, gpu) {
+    unit.uuid ||= gpu.uuid;
+    unit.pciBus ||= gpu.pciBus;
+    unit.model ||= friendlyModel(gpu.model);
+    const total = (gpu.memoryUsed ?? 0) + (gpu.memoryFree ?? 0);
+    if (!unit.memory && total > 0) unit.memory = total;
+    unit.live = {
+      util: gpu.util,
+      memoryUsed: gpu.memoryUsed,
+      memoryTotal: total > 0 ? total : unit.memory || void 0,
+      temperature: gpu.temperature,
+      power: gpu.power,
+      nvlink: gpu.nvlink
+    };
+  }
+  function applyVisible(views, pods) {
+    const byNode = new Map(views.map((v) => [v.name, v]));
+    for (const pod of pods) {
+      const node = pod.spec?.nodeName;
+      if (!node || !isLive(pod)) continue;
+      const view = byNode.get(node);
+      const visible = view ? visibleDevices(pod) : void 0;
+      if (!view || !visible) continue;
+      const wanted2 = visible.devices.map((d) => d.toLowerCase());
+      const targets = visible.all ? view.units : view.units.filter((u) => wanted2.includes(u.label.toLowerCase()) || u.uuid !== "" && wanted2.includes(u.uuid.toLowerCase()));
+      for (const unit of targets) {
+        const consumer = { namespace: pod.metadata.namespace ?? "", pod: pod.metadata.name, claim: "", via: visible.env };
+        if (unit.consumers.some((c) => c.namespace === consumer.namespace && c.pod === consumer.pod)) continue;
+        unit.consumers.push(consumer);
+        if (unit.partitions.length === 0) unit.state = holdState(unit.claims, unit.consumers, false);
+        if (unit.consumers.every((c) => c.via)) unit.inferred = false;
+      }
+    }
+  }
   function isInUse(unit) {
     return unit.state === "allocated" || unit.state === "shared" || unit.state === "partial";
   }
@@ -722,7 +822,7 @@
       for (const cell of cells) {
         for (const c of cell.holders) {
           const key = `${c.namespace}/${c.pod}`;
-          heldByPod.set(key, [...heldByPod.get(key) ?? [], { unitId: unit.id, partitionId: cell.partitionId, label: cell.label, node: unit.node, model: unit.model, claim: "", inferred: true }]);
+          heldByPod.set(key, [...heldByPod.get(key) ?? [], { unitId: unit.id, partitionId: cell.partitionId, label: cell.label, node: unit.node, model: unit.model, claim: "", inferred: unit.inferred }]);
         }
       }
     }

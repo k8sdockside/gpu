@@ -4,11 +4,11 @@
 // want in front of you before draining it: how many cards, how many busy,
 // and whose pods they are.
 
-import { buildInventory, isInUse, type Unit } from '../model/inventory.js';
+import { isInUse, type Unit } from '../model/inventory.js';
 import { PODS, type Node } from '../model/kube.js';
 import { byId, el, replace } from '../ui/dom.js';
 import { grid, inspector, modelsLine, sourcePills, usePill } from '../ui/grid.js';
-import { loadSnapshot } from '../ui/load.js';
+import { dcgmReader, inventoryWithDcgm, loadSnapshot } from '../ui/load.js';
 import { start } from '../ui/page.js';
 import { nothing, openName, pill } from '../ui/parts.js';
 
@@ -16,7 +16,8 @@ start('panel', async () => {
     const host = byId('panel');
     const node = await k8sdockside.object<Node>();
     const snap = await loadSnapshot({ events: false, daemonSets: false });
-    const view = buildInventory(snap).nodes.find((n) => n.name === node.metadata.name);
+    const { inventory } = await inventoryWithDcgm(snap, dcgmReader());
+    const view = inventory.nodes.find((n) => n.name === node.metadata.name);
 
     if (!view) {
         replace(host, nothing('No accelerators on this node: it advertises no GPU or other device through a device plugin, and no DRA driver publishes one here.'));

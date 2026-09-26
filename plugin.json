@@ -2,7 +2,7 @@
     "$schema": "https://raw.githubusercontent.com/k8sdockside/k8sdockside/main/docs/plugin.schema.json",
     "id": "gpu",
     "name": "GPU & Accelerators",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "minAppVersion": "0.1.12",
     "tagline": "GPUs and other devices, through device plugins or DRA",
     "icon": "chip",
@@ -19,7 +19,7 @@
         { "label": "DRA example driver", "url": "https://github.com/kubernetes-sigs/dra-example-driver" },
         { "label": "Plugin source", "url": "https://github.com/k8sdockside/gpu" }
     ],
-    "description": "A pod gets a GPU one of two ways: a device plugin advertises nvidia.com/gpu on the node and the pod asks for it in its limits, or a DRA driver publishes each device in a ResourceSlice and a ResourceClaim is allocated a named one. Clusters use both, and neither shows the whole picture on its own.\n\nThe Dashboard counts every accelerator once, whichever way it is advertised: how many there are, how many are in use, how many are free, and what pending pods are waiting for — broken down by model and vendor, with what needs attention written out: pods that cannot be scheduled and why, in words, GPUs a node has lost, devices a driver has tainted, and driver daemonsets that are not ready. The Inventory draws every device as a square on its node, coloured free, in use, shared or unhealthy, with MIG instances as cells across the square and time-slicing as slots along its foot; point at one for its model, memory, driver, every attribute its driver publishes, and the pods using it. Claims & workloads is the same from the pods' side: who holds what, which claims are shared, and which pods are waiting.\n\nNodes, Pods and ResourceClaims each get a panel of their own. With NVIDIA's DCGM exporter in a Prometheus, the Dashboard adds utilisation and memory charts. It changes nothing in the cluster.",
+    "description": "One picture of every GPU, from every source that can describe it. The GPUs page draws each machine's cards in nvidia-smi's order, NVLink pairs framed together, each with its UUID, PCI bus, memory, utilisation and the model it is serving (vLLM, SGLang, TGI, NIM and more, read from the pods' command lines). With NVIDIA's DCGM exporter in Prometheus it says which pod has which card rather than counting; NVLinks come from nvidia-smi topo -m pasted in, or from what the model is built as.\n\nA pod gets a GPU one of two ways: a device plugin advertises nvidia.com/gpu on the node and the pod asks for it in its limits, or a DRA driver publishes each device in a ResourceSlice and a ResourceClaim is allocated a named one. Clusters use both, and neither shows the whole picture on its own.\n\nThe Dashboard counts every accelerator once, whichever way it is advertised: how many there are, how many are in use, how many are free, and what pending pods are waiting for — broken down by model and vendor, with what needs attention written out: pods that cannot be scheduled and why, in words, GPUs a node has lost, devices a driver has tainted, and driver daemonsets that are not ready. The Inventory draws every device as a square on its node, coloured free, in use, shared or unhealthy, with MIG instances as cells across the square and time-slicing as slots along its foot; point at one for its model, memory, driver, every attribute its driver publishes, and the pods using it. Claims & workloads is the same from the pods' side: who holds what, which claims are shared, and which pods are waiting.\n\nNodes, Pods and ResourceClaims each get a panel of their own. With NVIDIA's DCGM exporter in a Prometheus, the Dashboard adds utilisation and memory charts. It changes nothing in the cluster.",
 
     "requires": [
         { "kind": "nodes", "label": "Nodes" },
@@ -27,20 +27,20 @@
         { "kind": "resourceclaims", "label": "Resource claims (DRA)", "optional": true },
         { "kind": "resourceclaimtemplates", "label": "Resource claim templates (DRA)", "optional": true },
         { "kind": "deviceclasses", "label": "Device classes (DRA)", "optional": true },
-        { "kind": "nodes", "label": "NVIDIA GPU nodes (GPU feature discovery)", "selector": "nvidia.com/gpu.present=true", "optional": true }
+        { "kind": "nodes", "label": "Nodes labelled by NVIDIA GPU feature discovery", "selector": "nvidia.com/gpu.present=true", "optional": true }
     ],
 
     "overview": { "entry": "overview.html" },
 
     "views": [
+        { "id": "gpus", "label": "GPUs", "icon": "chip", "type": "custom", "entry": "gpus.html" },
         { "id": "inventory", "label": "Inventory", "icon": "layers", "type": "custom", "entry": "inventory.html" },
         { "id": "workloads", "label": "Claims & workloads", "icon": "grant", "type": "custom", "entry": "workloads.html" },
 
         { "id": "slices", "label": "Resource slices", "icon": "layers", "kind": "resourceslices" },
         { "id": "claims", "label": "Resource claims", "icon": "grant", "kind": "resourceclaims" },
         { "id": "templates", "label": "Claim templates", "icon": "file", "kind": "resourceclaimtemplates" },
-        { "id": "classes", "label": "Device classes", "icon": "chip", "kind": "deviceclasses" },
-        { "id": "nvidia-nodes", "label": "NVIDIA GPU nodes", "icon": "server", "kind": "nodes", "selector": "nvidia.com/gpu.present=true" }
+        { "id": "classes", "label": "Device classes", "icon": "chip", "kind": "deviceclasses" }
     ],
 
     "charts": [
@@ -102,6 +102,76 @@
             "legend": "gpu",
             "query": "avg by (gpu) (DCGM_FI_DEV_GPU_UTIL{namespace=\"$namespace\",pod=\"$name\"} or DCGM_FI_DEV_GPU_UTIL{exported_namespace=\"$namespace\",exported_pod=\"$name\"}) / 100",
             "description": "The GPUs this pod is using, from DCGM's pod mapping. Prometheus renames the pod label to exported_pod unless the scrape honours labels, so both spellings are asked for."
+        },
+        {
+            "id": "data-dcgm-memory-used",
+            "label": "Data: DCGM memory used, per card",
+            "attach": "overview",
+            "query": "max by (Hostname, gpu, UUID, pci_bus_id, device, modelName, DCGM_FI_DRIVER_VERSION, GPU_I_ID, GPU_I_PROFILE, namespace, pod, container, exported_namespace, exported_pod, exported_container) (DCGM_FI_DEV_FB_USED)",
+            "description": "Read by the GPUs page, not drawn: one series per card and per pod on it, named by every label DCGM writes -- index, UUID, PCI bus, model, and the pod the card was handed to. Framebuffer in use, in MiB."
+        },
+        {
+            "id": "data-dcgm-util",
+            "label": "Data: DCGM utilisation, per card",
+            "attach": "overview",
+            "query": "max by (Hostname, gpu, UUID, pci_bus_id, device, modelName, DCGM_FI_DRIVER_VERSION, GPU_I_ID, GPU_I_PROFILE, namespace, pod, container, exported_namespace, exported_pod, exported_container) (DCGM_FI_DEV_GPU_UTIL)",
+            "description": "Read by the GPUs page, not drawn: each card's utilisation in percent, with the same labels, for a card with nothing in its memory."
+        },
+        {
+            "id": "data-dcgm-memory-free",
+            "label": "Data: DCGM memory free, per card",
+            "attach": "overview",
+            "query": "max by (Hostname, UUID, GPU_I_ID) (DCGM_FI_DEV_FB_FREE)",
+            "description": "Read by the GPUs page, not drawn: framebuffer free on each card, in MiB."
+        },
+        {
+            "id": "data-dcgm-temperature",
+            "label": "Data: DCGM temperature, per card",
+            "attach": "overview",
+            "query": "max by (Hostname, UUID) (DCGM_FI_DEV_GPU_TEMP)",
+            "description": "Read by the GPUs page, not drawn: each card's temperature in degrees Celsius."
+        },
+        {
+            "id": "data-dcgm-power",
+            "label": "Data: DCGM power, per card",
+            "attach": "overview",
+            "query": "max by (Hostname, UUID) (DCGM_FI_DEV_POWER_USAGE)",
+            "description": "Read by the GPUs page, not drawn: what each card draws, in watts."
+        },
+        {
+            "id": "data-dcgm-nvlink",
+            "label": "Data: DCGM NVLink traffic, per card",
+            "attach": "overview",
+            "query": "max by (Hostname, UUID) (DCGM_FI_PROF_NVLINK_TX_BYTES) + max by (Hostname, UUID) (DCGM_FI_PROF_NVLINK_RX_BYTES)",
+            "description": "Read by the GPUs page, not drawn: bytes per second over each card's NVLinks, both ways. Needs DCGM's profiling metrics, which not every exporter configuration collects."
+        },
+        {
+            "id": "data-vllm-running",
+            "label": "Data: vLLM requests running",
+            "attach": "overview",
+            "query": "sum by (namespace, pod, model_name) (vllm:num_requests_running)",
+            "description": "Read by the GPUs page, not drawn: requests each vLLM server is working on, when Prometheus scrapes its /metrics."
+        },
+        {
+            "id": "data-vllm-waiting",
+            "label": "Data: vLLM requests waiting",
+            "attach": "overview",
+            "query": "sum by (namespace, pod, model_name) (vllm:num_requests_waiting)",
+            "description": "Read by the GPUs page, not drawn: requests queued at each vLLM server."
+        },
+        {
+            "id": "data-vllm-kv-cache",
+            "label": "Data: vLLM KV cache in use",
+            "attach": "overview",
+            "query": "max by (namespace, pod, model_name) (vllm:kv_cache_usage_perc or vllm:gpu_cache_usage_perc)",
+            "description": "Read by the GPUs page, not drawn: how full each vLLM server's KV cache is, 0 to 1. vLLM renamed the metric; both names are asked for."
+        },
+        {
+            "id": "data-vllm-tokens",
+            "label": "Data: vLLM tokens generated per second",
+            "attach": "overview",
+            "query": "sum by (namespace, pod, model_name) (rate(vllm:generation_tokens_total[5m]))",
+            "description": "Read by the GPUs page, not drawn: output tokens per second from each vLLM server, over five minutes."
         }
     ],
 

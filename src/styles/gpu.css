@@ -1545,3 +1545,343 @@ tbody tr:last-child td {
 .users .mono {
     min-width: 58px;
 }
+
+/* ----- GPUs: one card per GPU, NVLinks framed ---------------------------------- */
+
+.board {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 12px 14px;
+    margin-bottom: 14px;
+}
+
+.board-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: stretch;
+    gap: 14px;
+}
+
+/* GPUs that share an NVLink: framed together, the bridge drawn between them. */
+.nvl-group {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    border: 1.5px solid color-mix(in srgb, var(--chart-2) 70%, transparent);
+    background: color-mix(in srgb, var(--chart-2) 6%, transparent);
+    border-radius: 12px;
+    padding: 16px 8px 8px;
+    max-width: 100%;
+}
+
+/* Read from the model rather than the machine: the frame is dashed, as a guess. */
+.nvl-group.guessed {
+    border-style: dashed;
+}
+
+.nvl-tag {
+    position: absolute;
+    top: -9px;
+    left: 12px;
+    padding: 0 6px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--chart-2);
+    background: var(--bg-panel);
+    border-radius: 4px;
+    white-space: nowrap;
+}
+
+.nvl-cards {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: stretch;
+    gap: 0;
+}
+
+.nvl-cards > .gpu-card + .gpu-card {
+    margin-left: 8px;
+}
+
+.nvl-bridge {
+    align-self: center;
+    width: 18px;
+    height: 10px;
+    margin: 0;
+    border-radius: 3px;
+    background: repeating-linear-gradient(90deg, var(--chart-2) 0 3px, transparent 3px 5px);
+    flex: none;
+}
+
+.nvl-switch {
+    text-align: center;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--chart-2);
+    border-top: 3px solid color-mix(in srgb, var(--chart-2) 70%, transparent);
+    padding-top: 4px;
+}
+
+.gpu-card {
+    width: 218px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    padding: 10px 11px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg-raised);
+    border-top: 4px solid var(--border);
+    transition:
+        transform 120ms ease,
+        box-shadow 120ms ease;
+}
+
+.gpu-card.pick:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--text) 25%, transparent);
+}
+
+.card-free {
+    border-top-color: var(--state-free);
+}
+.card-allocated,
+.card-partial {
+    border-top-color: var(--state-used);
+}
+.card-shared {
+    border-top-color: var(--state-shared);
+}
+.card-unhealthy {
+    border-top-color: var(--state-bad);
+}
+
+.card-top {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+}
+
+.card-index {
+    font-size: 15px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+
+.card-state {
+    font-size: 11px;
+    color: var(--text-dim);
+}
+
+.card-model {
+    font-weight: 550;
+}
+
+.card-ids {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px 10px;
+    font-size: 11px;
+    color: var(--text-faint);
+}
+
+.card-meter {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.meter-label {
+    font-size: 11px;
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+}
+
+.meter {
+    height: 6px;
+    border-radius: 3px;
+    background: color-mix(in srgb, var(--text) 10%, transparent);
+    overflow: hidden;
+}
+
+.meter-fill {
+    display: block;
+    height: 100%;
+    background: var(--state-used);
+    border-radius: 3px;
+}
+
+.card-numbers {
+    font-size: 11px;
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+}
+
+.card-work {
+    margin-top: auto;
+    padding-top: 6px;
+    border-top: 1px solid var(--border-soft);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 0;
+}
+
+.served {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.served-head {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px 6px;
+}
+
+.served-name {
+    font-size: 14px;
+}
+
+.served-model {
+    font-size: 11px;
+    color: var(--text-dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.served-load {
+    font-size: 11px;
+}
+
+.served-pod {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.card-guess,
+.card-problem {
+    font-size: 11px;
+    color: var(--text-faint);
+}
+
+.card-problem {
+    color: var(--error);
+}
+
+/* ----- GPUs: the sources, the NVLinks, the text ---------------------------------- */
+
+.sources {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 8px 18px;
+}
+
+.source {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+}
+
+.source .dot {
+    margin-top: 6px;
+}
+
+.source-name {
+    font-weight: 600;
+}
+
+.source-name .faint {
+    font-weight: 400;
+}
+
+.source-finding {
+    color: var(--text-dim);
+    font-size: 12px;
+}
+
+.source-none .source-finding {
+    color: var(--text-faint);
+}
+
+.topo + .topo {
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border-soft);
+}
+
+.topo-links {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    font-size: 12px;
+}
+
+.topo-edit textarea {
+    display: block;
+    width: 100%;
+    margin-top: 8px;
+    font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: var(--text);
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 8px;
+    resize: vertical;
+}
+
+.topo-buttons {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.text-block > summary {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+}
+
+.as-text {
+    margin: 0;
+    padding: 10px 12px;
+    background: var(--bg-raised);
+    border: 1px solid var(--border-soft);
+    border-radius: 8px;
+    font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: var(--text);
+    overflow-x: auto;
+    white-space: pre;
+    user-select: text;
+}
+
+@media (max-width: 520px) {
+    .gpu-card {
+        width: 100%;
+    }
+}
+
+/* A sentence about a machine the cards alone do not tell: worth reading, so not faint. */
+.board-note {
+    margin: 10px 0 0;
+    padding: 8px 10px;
+    font-size: 12px;
+    color: var(--text-dim);
+    background: color-mix(in srgb, var(--warn) 8%, transparent);
+    border-left: 3px solid color-mix(in srgb, var(--warn) 60%, transparent);
+    border-radius: 0 6px 6px 0;
+}

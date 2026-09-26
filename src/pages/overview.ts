@@ -9,14 +9,14 @@
 // DRA -- as one fleet, and says which it is looking at.
 
 import { acceleratorDaemons, drivers, issues, type DaemonView, type DriverView, type Issue } from '../model/attention.js';
-import { buildInventory, type Inventory, type Tally } from '../model/inventory.js';
+import { type Inventory, type Tally } from '../model/inventory.js';
 import { DAEMONSETS } from '../model/kube.js';
 import { count, memory, percent } from '../model/units.js';
 import { buildWorkloads, type Workloads } from '../model/workloads.js';
 import { chartsBlock } from '../ui/charts.js';
 import { byId, button, el, replace } from '../ui/dom.js';
 import { STATE_WORDS } from '../ui/grid.js';
-import { loadSnapshot, servesDra } from '../ui/load.js';
+import { dcgmReader, inventoryWithDcgm, loadSnapshot, servesDra } from '../ui/load.js';
 import { every, message, remember, start } from '../ui/page.js';
 import { block, clickable, heading, legend, nothing, openName, pill, ring, stack, tile, type Slice } from '../ui/parts.js';
 
@@ -28,12 +28,13 @@ start('page', async (ctx) => {
     const failure = el('p', { class: 'refresh-failure' });
     // The charts are asked for once: they are hours of history, not live counts.
     const charts = chartsBlock();
+    const read = dcgmReader();
 
     const stop = every(
         REFRESH,
         async () => {
             const snap = await loadSnapshot();
-            const inventory = buildInventory(snap);
+            const { inventory } = await inventoryWithDcgm(snap, read);
             const work = buildWorkloads(snap, inventory);
             const daemons = acceleratorDaemons(snap.daemonSets);
             failure.textContent = '';

@@ -15,7 +15,7 @@
 // with no DCGM behind it.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { chartsPanel, LISTS, noDcgm, noPrometheus, panelObjects, nodes } from '../fixtures.js';
+import { bareLists, chartsPanel, LISTS, noDcgm, noPrometheus, nvlCharts, nvlLists, panelObjects, nodes } from '../fixtures.js';
 
 type Lists = Record<string, unknown[]>;
 
@@ -231,5 +231,97 @@ describe('the panels', () => {
         expect(text).toContain('gpu-3');
         expect(text).toContain('dgx-h100-02');
         expect(text).toContain('vllm-b');
+    });
+});
+
+describe('the GPUs page', () => {
+    /** The text of the card for one GPU. */
+    const card = (index: string) => [...document.querySelectorAll('.gpu-card')].find((c) => c.querySelector('.card-index')?.textContent === `GPU ${index}`)?.textContent ?? '';
+
+    it('draws each card with the model on it, as DCGM maps them, framed in NVLink pairs', async () => {
+        vi.stubGlobal('k8sdockside', bridge(nvlLists, null, nvlCharts()));
+        document.body.innerHTML = PAGE;
+        const text = await run('./gpus.js');
+
+        expect(document.querySelectorAll('.gpu-card')).toHaveLength(4);
+        expect(document.querySelectorAll('.nvl-group')).toHaveLength(2);
+        expect(text).toContain('NVLink · NV12 (from the model)');
+        expect(text).toContain('4 GPUs on 1 machine, 4 in use, serving 3 models.');
+        // DCGM, not the count: gpt-oss was created first and would be on GPU 0 by count.
+        expect(card('3')).toContain('nhn-large');
+        expect(card('3')).toContain('openai/gpt-oss-120b');
+        expect(card('3')).toContain('83% busy');
+        expect(card('3')).toContain('7 running · KV cache 41%');
+        expect(card('0')).toContain('nhn-medium');
+        expect(card('0')).toContain('TP 2');
+        expect(card('2')).toContain('nhn-coder');
+        expect(text).not.toContain('placed by count');
+    });
+
+    it('writes the tables, and the whole picture as text', async () => {
+        vi.stubGlobal('k8sdockside', bridge(nvlLists, null, nvlCharts()));
+        document.body.innerHTML = PAGE;
+        await run('./gpus.js');
+        const pre = document.querySelector('.as-text')?.textContent ?? '';
+
+        expect(pre).toContain('GPU    SHORT NAME          SOURCE MODEL                                NAMESPACE                 POD');
+        expect(pre).toContain('3      nhn-large           openai/gpt-oss-120b                         vllm-gpt-oss-120b         vllm-gpt-oss-120b-67fcdc9f66-rz5j8');
+        expect(pre).toContain('GPU 0: NVIDIA H100 NVL | GPU-d1891b91-980f-4191-34f1-9b2046bf3af5 | 00000000:02:00.0 | allocation: nhn-medium');
+        expect(pre).toContain('GPU 3: NVIDIA H100 NVL | GPU-7ecb082d-46c8-e7b2-8804-c2979adfe8fe | 00000000:E3:00.0 | allocation: nhn-large');
+        expect(pre).toContain('NVLink connections\nGPU 0 <-> GPU 1: NV12\nGPU 2 <-> GPU 3: NV12');
+        expect(document.body.textContent).toContain('Models on the GPUs');
+        expect(document.body.textContent).toContain('with pod mapping, so which pod has which card is read, not counted.');
+    });
+
+    it('says which cards are counted, not read, without a Prometheus', async () => {
+        vi.stubGlobal('k8sdockside', bridge(nvlLists, null, noPrometheus));
+        document.body.innerHTML = PAGE;
+        const text = await run('./gpus.js');
+        expect(document.querySelectorAll('.gpu-card')).toHaveLength(4);
+        expect(text).toContain('placed by count');
+        expect(text).toContain('No Prometheus was found');
+        expect(document.querySelector('.as-text')?.textContent).toContain('~0     nhn-large');
+    });
+
+    it('draws what was pasted from nvidia-smi over what the model says', async () => {
+        vi.stubGlobal('k8sdockside', bridge(nvlLists, null, nvlCharts(), { topology: { 'gpu-h100nvl-01': [{ a: '0', b: '2', kind: 'NV4' }] } }));
+        document.body.innerHTML = PAGE;
+        const text = await run('./gpus.js');
+        expect(text).toContain('NVLink · NV4');
+        expect(text).not.toContain('(from the model)');
+        expect(text).toContain('From nvidia-smi topo -m, pasted here');
+        expect(document.querySelectorAll('.nvl-group')).toHaveLength(1);
+    });
+
+    it('puts pods that pick their GPUs by env on those cards, and says the scheduler does not know', async () => {
+        vi.stubGlobal('k8sdockside', bridge(bareLists, null, noPrometheus));
+        document.body.innerHTML = PAGE;
+        const text = await run('./gpus.js');
+
+        expect(text).toContain('4 GPUs on 1 machine, 3 in use, serving 4 models.');
+        expect(card('3')).toContain('nhn-large');
+        expect(card('3')).toContain('via NVIDIA_VISIBLE_DEVICES, not the scheduler');
+        expect(card('0')).toContain('nhn-medium');
+        expect(card('1')).toContain('nhn-medium');
+        // By UUID: only a card whose UUID is known can be matched, and nothing here knows it.
+        expect(card('2')).toContain('nothing on it');
+        expect(text).toContain('vllm-qwen3-8-27b-7cfd766d96-rxpmz names GPU-5e83768b-5b44-7593-8d06-0a0bc7b22822 in NVIDIA_VISIBLE_DEVICES, and no card here is known by that name');
+        expect(text).not.toContain('placed by count');
+        expect(text).toContain('Only the device plugin describes these cards');
+        expect(text).toContain('the scheduler still counts them free');
+        expect(text).toContain('ollama-5d8f7c9b4-kq2lm serves a model here but asks the scheduler for no GPU');
+        expect(text).toContain('It runs with NVIDIA’s runtime class, which hands out GPUs outside the scheduler, so which card it uses is not in the pod’s spec.');
+        expect(text).toContain('Which GPU it is on, from the pod’s NVIDIA_VISIBLE_DEVICES.');
+        expect(document.querySelector('.as-text')?.textContent).toContain('3      nhn-large');
+    });
+
+    it('draws a whole fleet of DRA, MIG and device-plugin nodes without falling over', async () => {
+        vi.stubGlobal('k8sdockside', bridge(LISTS));
+        document.body.innerHTML = PAGE;
+        const text = await run('./gpus.js');
+        expect(document.querySelectorAll('.gpu-card')).toHaveLength(55);
+        expect(text).toContain('NVSwitch');
+        expect(text).toContain('No inference server among the pods');
+        expect(text).toContain('has no DCGM metrics');
     });
 });

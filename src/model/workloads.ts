@@ -119,7 +119,7 @@ export function buildWorkloads(snap: Pick<Snapshot, 'nodes' | 'pods' | 'claims' 
         for (const cell of cells) {
             for (const c of cell.holders) {
                 const key = `${c.namespace}/${c.pod}`;
-                heldByPod.set(key, [...(heldByPod.get(key) ?? []), { unitId: unit.id, partitionId: cell.partitionId, label: cell.label, node: unit.node, model: unit.model, claim: '', inferred: true }]);
+                heldByPod.set(key, [...(heldByPod.get(key) ?? []), { unitId: unit.id, partitionId: cell.partitionId, label: cell.label, node: unit.node, model: unit.model, claim: '', inferred: unit.inferred }]);
             }
         }
     }
