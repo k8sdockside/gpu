@@ -22,7 +22,7 @@
         "check": "npm run typecheck && npm run test && k8sdockside-plugin check"
     },
     "devDependencies": {
-        "@k8sdockside/plugin-sdk": "^1.0.0",
+        "@k8sdockside/plugin-sdk": "^1.1.0",
         "esbuild": "0.28.2",
         "happy-dom": "^21.0.3",
         "typescript": "^7.0.2",
